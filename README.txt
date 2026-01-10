@@ -18,6 +18,41 @@ Set these environment variables in the env:
 
 OPENAI_API_KEY=sk-xxxxx
 VECTOR_STORE_ID=
+
+----------------------------------------
+OpenAI API key & Vector Store setup
+----------------------------------------
+
+1) Get an OpenAI API key  
+• Go to https://platform.openai.com  
+• Create an account or log in  
+• Click your profile → “View API keys”  
+• Create a new key and copy it  
+
+Set it in your environment:
+    export OPENAI_API_KEY=sk-...
+or put it in your .env file:
+    OPENAI_API_KEY=sk-...
+
+
+2) (Optional but recommended) Create a Vector Store for RAG
+
+Vector stores let the model retrieve your playbook, rules, and priors.
+
+• Go to https://platform.openai.com → Storage → Vector Stores  
+• Create a new vector store  
+• Upload your playbook / markdown files  
+• Copy the Vector Store ID  
+
+Set it in your environment:
+    export VECTOR_STORE_ID=vs_...
+or in .env:
+    VECTOR_STORE_ID=vs_...
+
+If no VECTOR_STORE_ID is set, the app still works, but runs in “no-RAG” mode
+(using general biological reasoning only).
+
+
 ----------------------------------------
 2) RUNNING WITH DOCKER
 ----------------------------------------
