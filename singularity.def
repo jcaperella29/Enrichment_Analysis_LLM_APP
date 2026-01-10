@@ -1,0 +1,41 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%environment
+    export PYTHONDONTWRITEBYTECODE=1
+    export PYTHONUNBUFFERED=1
+    # Optional: allow overriding at runtime
+    export PORT=${PORT:-5000}
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        libfreetype6-dev \
+        libjpeg62-turbo-dev \
+        zlib1g-dev \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+    python -m pip install --no-cache-dir --upgrade pip
+    python -m pip install --no-cache-dir \
+        Flask>=3.0 \
+        Werkzeug>=3.0 \
+        pandas>=2.0 \
+        numpy>=1.24 \
+        scipy>=1.11 \
+        python-dotenv>=1.0 \
+        reportlab>=4.0 \
+        tqdm>=4.66 \
+        openai \
+        gunicorn
+
+    mkdir -p /app
+
+%files
+    . /app
+
+%runscript
+    cd /app
+    # Gunicorn timeout (seconds) — adjust if your LLM calls can exceed this.
+    exec gunicorn -w 2 -b 0.0.0.0:${PORT} --timeout 400 app:app
