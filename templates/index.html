@@ -1,0 +1,811 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Enrichment Triage (RAG + GPT-5)</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #121a2b;
+      --panel2: #0f1626;
+      --text: #e8eefc;
+      --muted: #a9b6d6;
+      --line: rgba(255,255,255,.10);
+      --ok: #54d18b;
+      --warn: #f7c948;
+      --bad: #ff6b6b;
+      --chip: rgba(255,255,255,.08);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 600px at 20% 0%, rgba(93,135,255,.18), transparent 50%),
+                  radial-gradient(900px 500px at 80% 10%, rgba(84,209,139,.12), transparent 55%),
+                  var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.35;
+    }
+    header {
+      padding: 22px 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(0,0,0,.18);
+      position: sticky;
+      top: 0;
+      backdrop-filter: blur(10px);
+      z-index: 10;
+    }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 18px; }
+    h1 { margin: 0 0 6px; font-size: 20px; letter-spacing: .2px; }
+    .sub { color: var(--muted); font-size: 13px; }
+    .grid {
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 10px 35px rgba(0,0,0,.35);
+    }
+    .card .hd {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(0,0,0,.12);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .card .bd { padding: 14px; }
+    .title { font-size: 14px; font-weight: 700; }
+    .pill {
+      font-size: 12px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--chip);
+      color: var(--muted);
+      border: 1px solid var(--line);
+      white-space: nowrap;
+    }
+
+    label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 6px; }
+    input, textarea, select {
+      width: 100%;
+      padding: 10px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: rgba(0,0,0,.22);
+      color: var(--text);
+      outline: none;
+    }
+    textarea { min-height: 70px; resize: vertical; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+    @media (max-width: 520px) {
+      .row2, .row3 { grid-template-columns: 1fr; }
+    }
+
+    button {
+      width: 100%;
+      margin-top: 14px;
+      padding: 12px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: linear-gradient(180deg, rgba(93,135,255,.75), rgba(93,135,255,.45));
+      color: white;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+
+    .status {
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--muted);
+      border-left: 3px solid var(--line);
+      padding-left: 10px;
+      white-space: pre-wrap;
+    }
+    .status.ok { border-left-color: var(--ok); color: rgba(232,238,252,.92); }
+    .status.bad { border-left-color: var(--bad); color: rgba(232,238,252,.92); }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(0,0,0,.10);
+    }
+    .tab {
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(255,255,255,.03);
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .tab.active { color: var(--text); border-color: rgba(93,135,255,.45); background: rgba(93,135,255,.12); }
+    .panel { display: none; padding: 14px; }
+    .panel.active { display: block; }
+
+    .kpi {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    @media (max-width: 720px) { .kpi { grid-template-columns: 1fr; } }
+    .kpi .box {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.03);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .kpi .box .lab { color: var(--muted); font-size: 12px; }
+    .kpi .box .val { font-size: 16px; font-weight: 800; margin-top: 2px; }
+
+    .list { display: flex; flex-direction: column; gap: 10px; }
+    .item {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.03);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .item .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .item .name { font-weight: 900; letter-spacing: .2px; }
+    .score {
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(0,0,0,.18);
+      color: var(--muted);
+    }
+    .meta { margin-top: 8px; color: var(--muted); font-size: 13px; }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .chip {
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 6px 8px;
+      border-radius: 999px;
+      background: var(--chip);
+      border: 1px solid var(--line);
+      color: rgba(232,238,252,.86);
+    }
+
+    .verdict {
+      font-weight: 900;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .6px;
+    }
+    .v_driver { background: rgba(84,209,139,.12); color: var(--ok); border-color: rgba(84,209,139,.30); }
+    .v_reactive { background: rgba(247,201,72,.10); color: var(--warn); border-color: rgba(247,201,72,.30); }
+    .v_artifact { background: rgba(255,107,107,.10); color: var(--bad); border-color: rgba(255,107,107,.30); }
+    .v_unclear { background: rgba(255,255,255,.06); color: var(--muted); }
+
+    details { margin-top: 10px; }
+    summary { cursor: pointer; color: rgba(232,238,252,.92); font-weight: 700; }
+    .exp {
+      margin-top: 8px;
+      border-left: 3px solid rgba(93,135,255,.35);
+      padding-left: 10px;
+      color: rgba(232,238,252,.92);
+    }
+    .exp .small { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+    th { text-align: left; color: var(--muted); font-weight: 700; }
+    td.mono { font-family: var(--mono); color: rgba(232,238,252,.9); }
+
+    .raw {
+      font-family: var(--mono);
+      font-size: 12px;
+      white-space: pre-wrap;
+      background: rgba(0,0,0,.25);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      overflow: auto;
+      max-height: 520px;
+    }
+
+    .btnRow {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .btnRow button {
+      width: auto;
+      margin-top: 0;
+      padding: 10px 12px;
+      border-radius: 10px;
+    }
+  </style>
+</head>
+
+<body>
+<header>
+  <div class="wrap">
+    <h1>Enrichment Triage</h1>
+    <div class="sub">Upload Enrichr-like enrichment results → program summary → GPT-5 + RAG prioritization & follow-ups.</div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="grid">
+
+    <!-- LEFT: Controls -->
+    <div class="card">
+      <div class="hd">
+        <div class="title">Inputs</div>
+        <div class="pill">POST /analyze</div>
+      </div>
+      <div class="bd">
+        <form id="analyzeForm" method="post" action="/analyze" enctype="multipart/form-data">
+          <label>Enrichment CSV</label>
+          <input id="file" type="file" name="file" accept=".csv,text/csv" required />
+
+          <label>Phenotype (what you care about)</label>
+          <textarea id="phenotype" name="phenotype" placeholder="e.g., increased muscle hypertrophy; fibrosis; antiviral response; tumor growth..." required></textarea>
+
+          <div class="row2">
+            <div>
+              <label>Assay</label>
+              <select id="assay" name="assay">
+                <option value="bulk RNA-seq">bulk RNA-seq</option>
+                <option value="scRNA-seq">scRNA-seq</option>
+                <option value="Perturb-seq">Perturb-seq</option>
+                <option value="ATAC-seq">ATAC-seq</option>
+                <option value="miRNA-seq">miRNA-seq</option>
+                <option value="GWAS">GWAS</option>
+              </select>
+            </div>
+            <div>
+              <label>Organism</label>
+              <input id="organism" name="organism" placeholder="e.g., human, mouse" />
+            </div>
+          </div>
+
+          <div class="row2">
+            <div>
+              <label>Tissue</label>
+              <input id="tissue" name="tissue" placeholder="e.g., muscle, tumor, immune, brain" />
+            </div>
+            <div>
+              <label>Cell type</label>
+              <input id="cell_type" name="cell_type" placeholder="e.g., myotube, T cell, fibroblast" />
+            </div>
+          </div>
+
+          <div class="row2">
+            <div>
+              <label>Perturbation</label>
+              <input id="perturbation" name="perturbation" placeholder="e.g., KO gene X, drug Y, infection" />
+            </div>
+            <div>
+              <label>Timepoint</label>
+              <input id="timepoint" name="timepoint" placeholder="e.g., 6h, 24h, day 7" />
+            </div>
+          </div>
+
+          <button id="runBtn" type="submit">Analyze</button>
+          <div id="status" class="status">Ready.</div>
+        </form>
+      </div>
+    </div>
+
+    <!-- RIGHT: Results -->
+    <div class="card">
+      <div class="hd">
+        <div class="title">Results</div>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <button id="downloadBtn" type="button" disabled
+            style="margin:0; padding:8px 10px; width:auto; border-radius:10px;
+                   border:1px solid rgba(255,255,255,.14);
+                   background: linear-gradient(180deg, rgba(84,209,139,.55), rgba(84,209,139,.25));
+                   font-weight:800;">
+            Download JSON
+          </button>
+          <div class="pill" id="metaPill">—</div>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <div class="tab active" data-tab="programs">Programs</div>
+        <div class="tab" data-tab="terms">Top Terms</div>
+        <div class="tab" data-tab="pdf">PDF Report</div>
+        <div class="tab" data-tab="raw">Raw JSON</div>
+      </div>
+
+      <!-- Programs panel -->
+      <div class="panel active" id="panel-programs">
+        <div class="kpi">
+          <div class="box">
+            <div class="lab">Programs returned</div>
+            <div class="val" id="kpiPrograms">—</div>
+          </div>
+          <div class="box">
+            <div class="lab">Top program</div>
+            <div class="val" id="kpiTopProgram">—</div>
+          </div>
+          <div class="box">
+            <div class="lab">Phenotype</div>
+            <div class="val" id="kpiPhenotype">—</div>
+          </div>
+        </div>
+
+        <div class="list" id="programList"></div>
+
+        <div class="item" style="margin-top:12px;">
+          <div class="top">
+            <div class="name">GPT summary</div>
+            <div class="score" id="gptHeadline">—</div>
+          </div>
+          <div class="meta" id="gptNotes"></div>
+        </div>
+
+        <div class="item" style="margin-top:10px;">
+          <div class="top">
+            <div class="name">Ranked programs (GPT)</div>
+          </div>
+          <div class="list" id="gptPrograms" style="margin-top:10px;"></div>
+        </div>
+
+        <div class="item" style="margin-top:10px;">
+          <div class="top">
+            <div class="name">Confounders to watch</div>
+          </div>
+          <div class="chips" id="confounders"></div>
+        </div>
+      </div>
+
+      <!-- Terms panel -->
+      <div class="panel" id="panel-terms">
+        <div class="item">
+          <div class="top">
+            <div class="name">Top enriched terms (triage)</div>
+            <div class="score" id="termCount">—</div>
+          </div>
+          <div style="margin-top:10px; overflow:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Term</th>
+                  <th class="mono">Score</th>
+                  <th>Flags</th>
+                  <th class="mono">Overlap</th>
+                </tr>
+              </thead>
+              <tbody id="termTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- PDF panel (WAS MISSING) -->
+      <div class="panel" id="panel-pdf">
+        <div class="item">
+          <div class="top">
+            <div class="name">PDF report</div>
+            <div class="score" id="pdfStatus">Not generated</div>
+          </div>
+
+          <div class="btnRow">
+            <button id="makePdfBtn" type="button" disabled
+              style="border:1px solid rgba(255,255,255,.14);
+                     background: linear-gradient(180deg, rgba(93,135,255,.75), rgba(93,135,255,.45));">
+              Generate PDF
+            </button>
+
+            <button id="downloadPdfBtn" type="button" disabled
+              style="border:1px solid rgba(255,255,255,.14);
+                     background: linear-gradient(180deg, rgba(84,209,139,.55), rgba(84,209,139,.25));">
+              Download PDF
+            </button>
+          </div>
+
+          <div class="meta" style="margin-top:10px;">
+            Preview:
+          </div>
+          <iframe id="pdfFrame"
+                  title="PDF preview"
+                  style="width:100%; height:540px; border:1px solid rgba(255,255,255,.10); border-radius:12px; margin-top:10px; background: rgba(0,0,0,.18);">
+          </iframe>
+        </div>
+      </div>
+
+      <!-- Raw panel -->
+      <div class="panel" id="panel-raw">
+        <div class="raw" id="rawJson">—</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+  // --- Tabs (defensive: don't crash if a panel is missing) ---
+  document.querySelectorAll(".tab").forEach(t => {
+    t.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+
+      const key = t.dataset.tab;
+      document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+
+      const panel = document.getElementById("panel-" + key);
+      if (panel) panel.classList.add("active");
+    });
+  });
+
+  const statusEl = document.getElementById("status");
+  const runBtn = document.getElementById("runBtn");
+  const downloadBtn = document.getElementById("downloadBtn");
+
+  const makePdfBtn = document.getElementById("makePdfBtn");
+  const downloadPdfBtn = document.getElementById("downloadPdfBtn");
+  const pdfFrame = document.getElementById("pdfFrame");
+  const pdfStatus = document.getElementById("pdfStatus");
+
+  let lastPdfUrl = null;
+  let lastResult = null;
+
+  function setStatus(msg, kind="") {
+    statusEl.className = "status " + (kind || "");
+    statusEl.textContent = msg;
+  }
+
+  downloadBtn.addEventListener("click", () => {
+    if (!lastResult) return;
+
+    const stamp = new Date().toISOString().replaceAll(":", "-");
+    const filename = `enrichment_triage_${stamp}.json`;
+
+    const blob = new Blob([JSON.stringify(lastResult, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    URL.revokeObjectURL(url);
+  });
+
+  makePdfBtn.addEventListener("click", async () => {
+    if (!lastResult) return;
+
+    makePdfBtn.disabled = true;
+    pdfStatus.textContent = "Generating…";
+
+    try {
+      const res = await fetch("/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(lastResult)
+      });
+
+      const text = await res.text();
+      if (!res.ok) {
+        pdfStatus.textContent = "Failed";
+        setStatus(`PDF error (${res.status}):\n${text}`, "bad");
+        return;
+      }
+
+      const data = JSON.parse(text);
+      const url = data?.pdf_url;
+      if (!url) {
+        pdfStatus.textContent = "Failed";
+        setStatus("PDF route returned no pdf_url.", "bad");
+        return;
+      }
+
+      lastPdfUrl = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+      pdfFrame.src = lastPdfUrl;
+      pdfStatus.textContent = "Ready ✅";
+      downloadPdfBtn.disabled = false;
+
+      setStatus("PDF generated ✅", "ok");
+    } catch (err) {
+      pdfStatus.textContent = "Failed";
+      setStatus("Client error generating PDF:\n" + (err?.message || String(err)), "bad");
+    } finally {
+      makePdfBtn.disabled = false;
+    }
+  });
+
+  downloadPdfBtn.addEventListener("click", () => {
+    if (!lastPdfUrl) return;
+
+    const cleanUrl = lastPdfUrl.split("?")[0];
+    const a = document.createElement("a");
+    a.href = cleanUrl;
+    a.download = cleanUrl.split("/").pop() || "triage_report.pdf";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+
+  function verdictClass(v) {
+    if (!v) return "v_unclear";
+    const x = v.toLowerCase();
+    if (x.includes("driver")) return "v_driver";
+    if (x.includes("reactive")) return "v_reactive";
+    if (x.includes("artifact")) return "v_artifact";
+    return "v_unclear";
+  }
+
+  function esc(s) {
+    return (s ?? "").toString()
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function renderPrograms(programs) {
+    const list = document.getElementById("programList");
+    list.innerHTML = "";
+
+    (programs || []).forEach(p => {
+      const genes = (p.top_genes || []).slice(0, 18);
+      const reps = (p.representative_terms || []).slice(0, 6);
+
+      const div = document.createElement("div");
+      div.className = "item";
+      div.innerHTML = `
+        <div class="top">
+          <div class="name">${esc(p.program)}</div>
+          <div class="score">score ${Number(p.program_score).toFixed(2)} · members ${p.member_count}</div>
+        </div>
+
+        <div class="chips">
+          ${genes.map(g => `<span class="chip">${esc(g)}</span>`).join("")}
+        </div>
+
+        <details>
+          <summary>Representative terms</summary>
+          <div class="meta">
+            ${reps.map(r => `
+              <div class="exp">
+                <div><b>${esc(r.term)}</b></div>
+                <div class="small">score ${Number(r.score).toFixed(2)} · overlap_k ${r.overlap_k}${(r.flags && r.flags.length) ? " · flags: " + esc(r.flags.join(", ")) : ""}</div>
+              </div>
+            `).join("")}
+          </div>
+        </details>
+      `;
+      list.appendChild(div);
+    });
+  }
+
+  // ---- Normalize YOUR JSON structure into the UI's expected format ----
+  function normalizeGPT(gpt, programsMeta) {
+    if (!gpt) return null;
+
+    // Flatten classification buckets -> ranked list
+    const buckets = gpt.program_classification || {};
+    const order = [
+      ["likely_driver", "Likely driver"],
+      ["likely_reactive", "Likely reactive"],
+      ["likely_artifact", "Likely artifact"],
+      ["unclear", "Unclear"]
+    ];
+
+    const ranked_programs = [];
+    order.forEach(([key, label]) => {
+      (buckets[key] || []).forEach(x => {
+        ranked_programs.push({
+          program: x.program,
+          verdict: label,
+          why: x.why || "",
+          key_genes: [], // optional (you already show key genes in non-GPT program cards)
+          supporting_terms: [],
+          followups: (gpt.follow_up_experiments || []).slice(0, 3).map((f, i) => ({
+            priority: i + 1,
+            experiment: f.perturbation || f.hypothesis || f.id || "Follow-up",
+            readout: f.readouts || "",
+            controls: f.controls || "",
+            expected_if_causal: f.expected_outcome_if_driver || ""
+          }))
+        });
+      });
+    });
+
+    // Confounders: pull key_rules snippets
+    const confounders_to_watch = [];
+    (gpt.applied_rules || []).forEach(r => {
+      (r.key_rules || []).forEach(k => confounders_to_watch.push(k));
+    });
+
+    const headline =
+      (gpt.phenotype || programsMeta?.phenotype || "GPT triage ready")
+        .slice(0, 120);
+
+    const notes = gpt.experiment_context
+      ? `Context: ${gpt.experiment_context.assay || "—"} · ${gpt.experiment_context.organism || "—"} · ${gpt.experiment_context.tissue || "—"} · ${gpt.experiment_context.cell_type || "—"}`
+      : "";
+
+    return { headline, notes, confounders_to_watch: confounders_to_watch.slice(0, 12), ranked_programs };
+  }
+
+  function renderGPT(gpt) {
+    document.getElementById("gptHeadline").textContent = gpt?.headline || "—";
+    document.getElementById("gptNotes").textContent = gpt?.notes || "";
+
+    const conf = document.getElementById("confounders");
+    conf.innerHTML = "";
+    (gpt?.confounders_to_watch || []).forEach(c => {
+      const s = document.createElement("span");
+      s.className = "chip";
+      s.textContent = c;
+      conf.appendChild(s);
+    });
+
+    const box = document.getElementById("gptPrograms");
+    box.innerHTML = "";
+
+    (gpt?.ranked_programs || []).forEach(p => {
+      const div = document.createElement("div");
+      div.className = "item";
+      div.innerHTML = `
+        <div class="top">
+          <div class="name">${esc(p.program)}</div>
+          <span class="verdict ${verdictClass(p.verdict)}">${esc(p.verdict || "unclear")}</span>
+        </div>
+        <div class="meta" style="margin-top:8px;">${esc(p.why || "")}</div>
+
+        <details>
+          <summary>Follow-up experiments</summary>
+          ${(p.followups || []).map(f => `
+            <div class="exp">
+              <div><b>P${esc(f.priority)}</b> · ${esc(f.experiment)}</div>
+              <div class="small"><b>Readout:</b> ${esc(f.readout)}</div>
+              <div class="small"><b>Controls:</b> ${esc(f.controls)}</div>
+              <div class="small"><b>Expected if causal:</b> ${esc(f.expected_if_causal)}</div>
+            </div>
+          `).join("") || `<div class="meta">No follow-ups returned.</div>`}
+        </details>
+      `;
+      box.appendChild(div);
+    });
+  }
+
+  function renderTopTerms(rows) {
+    const top = (rows || []).slice(0, 40);
+    document.getElementById("termCount").textContent = `${top.length} shown`;
+
+    const tb = document.getElementById("termTable");
+    tb.innerHTML = "";
+
+    top.forEach(r => {
+      const tr = document.createElement("tr");
+      const flags = (r.flags || []).join(", ");
+      const overlap = (r.overlap_n != null) ? `${r.overlap_k}/${r.overlap_n}` : `${r.overlap_k}`;
+      const score = r.combined_pre_gpt_score ?? r.triage_score ?? 0;
+      tr.innerHTML = `
+        <td>${esc(r.term)}</td>
+        <td class="mono">${Number(score).toFixed(2)}</td>
+        <td>${esc(flags)}</td>
+        <td class="mono">${esc(overlap)}</td>
+      `;
+      tb.appendChild(tr);
+    });
+  }
+
+  document.getElementById("analyzeForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+
+    const fileEl = document.getElementById("file");
+    if (!fileEl.files || !fileEl.files[0]) {
+      setStatus("Please choose a CSV file.", "bad");
+      return;
+    }
+
+    runBtn.disabled = true;
+    downloadBtn.disabled = true;
+    makePdfBtn.disabled = true;
+    downloadPdfBtn.disabled = true;
+
+    setStatus("Running analysis…", "");
+
+    const fd = new FormData();
+    fd.append("file", fileEl.files[0]);
+    fd.append("phenotype", document.getElementById("phenotype").value);
+    fd.append("assay", document.getElementById("assay").value);
+    fd.append("organism", document.getElementById("organism").value);
+    fd.append("tissue", document.getElementById("tissue").value);
+    fd.append("cell_type", document.getElementById("cell_type").value);
+    fd.append("perturbation", document.getElementById("perturbation").value);
+    fd.append("timepoint", document.getElementById("timepoint").value);
+
+    try {
+      const res = await fetch("/analyze", { method: "POST", body: fd });
+      const text = await res.text();
+
+      if (!res.ok) {
+        setStatus(`Server error (${res.status}):\n${text}`, "bad");
+        return;
+      }
+
+      const data = JSON.parse(text);
+
+      lastResult = data;
+      downloadBtn.disabled = false;
+
+      // Enable PDF generation now that we have JSON
+      makePdfBtn.disabled = false;
+
+      // Reset any previous PDF
+      lastPdfUrl = null;
+      pdfFrame.src = "";
+      pdfStatus.textContent = "Not generated";
+      downloadPdfBtn.disabled = true;
+
+      setStatus("Done ✅", "ok");
+
+      // meta
+      const nprog = data?.programs?.programs?.length ?? 0;
+      document.getElementById("metaPill").textContent = `programs ${nprog}`;
+
+      // KPIs
+      document.getElementById("kpiPrograms").textContent = nprog;
+      document.getElementById("kpiPhenotype").textContent = (data?.programs?.meta?.phenotype || "—").slice(0, 60);
+      document.getElementById("kpiTopProgram").textContent = data?.programs?.programs?.[0]?.program ?? "—";
+
+      // render panels
+      renderPrograms(data?.programs?.programs || []);
+
+      renderTopTerms((data?.triage?.rows || []).sort((a,b) => {
+        const sa = (a.combined_pre_gpt_score ?? a.triage_score ?? 0);
+        const sb = (b.combined_pre_gpt_score ?? b.triage_score ?? 0);
+        return sb - sa;
+      }));
+
+      // GPT rendering (NOW WIRED)
+      const gptNorm = normalizeGPT(data?.gpt, data?.programs?.meta);
+      renderGPT(gptNorm);
+
+      document.getElementById("rawJson").textContent = JSON.stringify(data, null, 2);
+
+    } catch (err) {
+      setStatus("Client error:\n" + (err?.message || String(err)), "bad");
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+</script>
+
+</body>
+</html>
+
+
