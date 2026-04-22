@@ -1,4 +1,3 @@
-# summarizer.py
 from __future__ import annotations
 
 import os
@@ -82,7 +81,6 @@ def _walk_text(node: Any, path: str = "") -> List[Tuple[str, str]]:
             out.extend(_walk_text(v, p))
         return out
 
-    # fallback
     try:
         s = str(node).strip()
         if s:
@@ -93,10 +91,103 @@ def _walk_text(node: Any, path: str = "") -> List[Tuple[str, str]]:
     return out
 
 
+def _normalize_text(s: str) -> str:
+    s = (s or "").strip()
+    s = s.replace("■", "-")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _structured_gpt_view(triage_json: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Prefer display fields first, then sections, then a few direct gpt fallbacks.
+    """
+    return {
+        "headline": (
+            _get(triage_json, "gpt_display.headline")
+            or _get(triage_json, "gpt.display.headline")
+            or _get(triage_json, "gpt.sections.headline")
+            or ""
+        ),
+        "experimental_context": (
+            _get(triage_json, "gpt_display.experimental_context")
+            or _get(triage_json, "gpt.display.experimental_context")
+            or _get(triage_json, "gpt.sections.experimental_context")
+            or ""
+        ),
+        "most_plausible_biology": (
+            _get(triage_json, "gpt_display.ranked_programs")
+            or _get(triage_json, "gpt.display.most_plausible_biology")
+            or _get(triage_json, "gpt.sections.most_plausible_biology")
+            or ""
+        ),
+        "likely_reactive_programs": (
+            _get(triage_json, "gpt.display.likely_reactive_programs")
+            or _get(triage_json, "gpt.sections.likely_reactive_programs")
+            or ""
+        ),
+        "likely_artifacts_confounders": (
+            _get(triage_json, "gpt_display.confounders_to_watch")
+            or _get(triage_json, "gpt.display.likely_artifacts_confounders")
+            or _get(triage_json, "gpt.sections.likely_artifacts_confounders")
+            or ""
+        ),
+        "evidence_strength_rationale": (
+            _get(triage_json, "gpt.display.evidence_strength_rationale")
+            or _get(triage_json, "gpt.sections.evidence_strength_rationale")
+            or ""
+        ),
+        "follow_up_experiments": (
+            _get(triage_json, "gpt_display.follow_up_experiments")
+            or _get(triage_json, "gpt.display.follow_up_experiments")
+            or _get(triage_json, "gpt.sections.follow_up_experiments")
+            or ""
+        ),
+        "main_uncertainties": (
+            _get(triage_json, "gpt.display.main_uncertainties")
+            or _get(triage_json, "gpt.sections.main_uncertainties")
+            or ""
+        ),
+        "raw_text": (
+            _get(triage_json, "gpt_display.raw_gpt_text")
+            or _get(triage_json, "gpt.display.raw_text")
+            or _get(triage_json, "gpt.raw_text")
+            or ""
+        ),
+    }
+
+
+def _best_effort_source_for_buckets(triage_json: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Restrict keyword-bucket extraction so we do NOT walk the entire JSON and duplicate
+    everything from gpt.display / gpt.sections / gpt_display / raw_text.
+    """
+    src: Dict[str, Any] = {}
+
+    # keep only genuinely useful, non-duplicative bits
+    for key in ["phenotype", "context"]:
+        if key in triage_json:
+            src[key] = triage_json[key]
+
+    if "programs" in triage_json:
+        src["programs"] = triage_json["programs"]
+
+    if "triage" in triage_json:
+        src["triage"] = triage_json["triage"]
+
+    # include structured GPT follow-ups only if present as a dedicated field
+    gpt_followups = _get(triage_json, "gpt.follow_up_experiments")
+    if gpt_followups:
+        src["gpt"] = {"follow_up_experiments": gpt_followups}
+
+    return src
+
+
 def _bucket_by_keywords(triage_json: Dict[str, Any]) -> Dict[str, List[str]]:
     """
-    Groups snippets into headings based on keywords anywhere in the JSON.
-    This is intentionally forgiving: we want PDFs to render even when GPT output is messy.
+    Groups snippets into headings based on keywords in a RESTRICTED subset of the JSON.
+    This avoids the same content being rediscovered from gpt.sections, gpt.display,
+    gpt_display, and gpt.raw_text all at once.
     """
     buckets: Dict[str, List[str]] = {
         "Drivers": [],
@@ -108,47 +199,61 @@ def _bucket_by_keywords(triage_json: Dict[str, Any]) -> Dict[str, List[str]]:
     }
 
     def add_unique(bucket: str, line: str) -> None:
-        line = re.sub(r"\s+", " ", (line or "")).strip()
+        line = _normalize_text(line)
         if not line:
             return
         if line not in buckets[bucket]:
             buckets[bucket].append(line)
 
-    texts = _walk_text(triage_json)
+    restricted = _best_effort_source_for_buckets(triage_json)
+    texts = _walk_text(restricted)
 
     for path, txt in texts:
         low = txt.lower()
 
-        # follow-ups / experiments
-        if any(k in low for k in ["follow up", "follow-up", "followup", "experiment", "validation", "knockdown", "ko ", "overexpress", "qPCR".lower()]):
-            add_unique("Follow-up experiments", f"{txt}  (from {path})")
+        if any(k in low for k in ["follow up", "follow-up", "followup", "experiment", "validation", "knockdown", "ko ", "overexpress", "qpcr"]):
+            add_unique("Follow-up experiments", f"{txt} (from {path})")
             continue
 
-        # confounders
         if "confound" in low:
-            add_unique("Confounders", f"{txt}  (from {path})")
+            add_unique("Confounders", f"{txt} (from {path})")
             continue
 
-        # verdict buckets
         if "reactive" in low:
-            add_unique("Reactive", f"{txt}  (from {path})")
+            add_unique("Reactive", f"{txt} (from {path})")
             continue
         if "artifact" in low:
-            add_unique("Artifacts", f"{txt}  (from {path})")
+            add_unique("Artifacts", f"{txt} (from {path})")
             continue
         if "driver" in low:
-            add_unique("Drivers", f"{txt}  (from {path})")
+            add_unique("Drivers", f"{txt} (from {path})")
             continue
 
-        # keep a little “other notes” mainly from gpt* paths
-        if path.startswith("gpt"):
-            add_unique("Other notes", f"{txt}  (from {path})")
+        # keep Other notes minimal; avoid dumping gpt blobs
+        if path.startswith("programs") or path.startswith("triage"):
+            add_unique("Other notes", f"{txt} (from {path})")
 
-    # trim so PDFs don’t get silly long
     for k in list(buckets.keys()):
-        buckets[k] = buckets[k][:80]
+        buckets[k] = buckets[k][:40]
 
     return buckets
+
+
+def _render_bullets_from_text(story: List[Any], text: str, body, max_items: int = 20) -> None:
+    text = _normalize_text(text)
+    if not text:
+        story.append(Paragraph("—", body))
+        return
+
+    parts = re.split(r"\s+-\s+", text)
+    parts = [_normalize_text(p) for p in parts if _normalize_text(p)]
+
+    if len(parts) <= 1:
+        story.append(Paragraph(text, body))
+        return
+
+    for p in parts[:max_items]:
+        story.append(Paragraph("• " + p, body))
 
 
 # --------------------------
@@ -160,10 +265,6 @@ def build_triage_pdf(
     title: Optional[str] = None,
     subtitle: Optional[str] = None,
 ) -> None:
-    """
-    Main entrypoint expected by app.py:
-        from summarizer import build_triage_pdf
-    """
     _build_pdf(
         triage_json=triage_json,
         pdf_path=out_pdf_path,
@@ -177,11 +278,6 @@ def generate_pdf_from_triage_json(
     out_dir: str = "static/reports",
     filename_prefix: str = "triage_report",
 ) -> Tuple[str, str]:
-    """
-    Convenience helper:
-    Writes a PDF into out_dir and returns (pdf_path, pdf_url).
-    Assumes Flask serves /static/ at "static/".
-    """
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -246,6 +342,7 @@ def _build_pdf(
     phenotype = (
         _get(triage_json, "programs.meta.phenotype")
         or _get(triage_json, "gpt.phenotype")
+        or _get(triage_json, "phenotype")
         or ""
     )
 
@@ -254,8 +351,9 @@ def _build_pdf(
         story.append(Paragraph(f"<b>Phenotype:</b> {_safe(phenotype)}", body))
         story.append(Spacer(1, 0.12 * inch))
 
-    # context can live in gpt.experiment_context OR (sometimes) programs.meta later
     ctx = _get(triage_json, "gpt.experiment_context", None)
+    if not isinstance(ctx, dict):
+        ctx = _get(triage_json, "context", None)
     if not isinstance(ctx, dict):
         ctx = _get(triage_json, "programs.meta.experiment_context", {}) or {}
 
@@ -281,6 +379,36 @@ def _build_pdf(
         story.append(Paragraph("No structured context found.", body))
 
     story.append(Spacer(1, 0.25 * inch))
+
+    # ---------------- Structured GPT interpretation ----------------
+    gptv = _structured_gpt_view(triage_json)
+
+    story.append(Paragraph("Structured interpretation", h2))
+
+    structured_sections = [
+        ("Headline", gptv["headline"]),
+        ("Experimental Context", gptv["experimental_context"]),
+        ("Most Plausible Biology", gptv["most_plausible_biology"]),
+        ("Likely Reactive Programs", gptv["likely_reactive_programs"]),
+        ("Likely Artifacts / Confounders", gptv["likely_artifacts_confounders"]),
+        ("Evidence Strength and Rationale", gptv["evidence_strength_rationale"]),
+        ("Follow-Up Experiments", gptv["follow_up_experiments"]),
+        ("Main Uncertainties", gptv["main_uncertainties"]),
+    ]
+
+    any_structured = any(v.strip() for _, v in structured_sections)
+    if any_structured:
+        for heading, content in structured_sections:
+            if not content.strip():
+                continue
+            story.append(Paragraph(heading, h3))
+            _render_bullets_from_text(story, content, body)
+            story.append(Spacer(1, 0.14 * inch))
+    else:
+        story.append(Paragraph("No structured GPT sections found.", body))
+        story.append(Spacer(1, 0.14 * inch))
+
+    story.append(Spacer(1, 0.20 * inch))
 
     # ---------------- Program classification (structured if present) ----------------
     story.append(Paragraph("Program triage (structured, if present)", h2))
@@ -395,24 +523,26 @@ def _build_pdf(
 
     story.append(Spacer(1, 0.25 * inch))
 
-    # ---------------- Extracted interpretation (keyword-based) ----------------
-    story.append(Paragraph("Extracted interpretation (keyword-based)", h2))
-    buckets = _bucket_by_keywords(triage_json)
+    # ---------------- Extracted interpretation (keyword-based, de-duplicated) ----------------
+        # ---------------- Extracted interpretation (keyword-based fallback only) ----------------
+    if not any(v.strip() for _, v in structured_sections):
+        story.append(Paragraph("Extracted interpretation (keyword-based)", h2))
+        buckets = _bucket_by_keywords(triage_json)
 
-    for heading in ["Drivers", "Reactive", "Artifacts", "Confounders", "Follow-up experiments", "Other notes"]:
-        story.append(Paragraph(heading, h3))
-        items = buckets.get(heading, []) or []
-        if not items:
-            story.append(Paragraph("—", body))
-            story.append(Spacer(1, 0.12 * inch))
-            continue
+        for heading in ["Drivers", "Reactive", "Artifacts", "Confounders", "Follow-up experiments", "Other notes"]:
+            story.append(Paragraph(heading, h3))
+            items = buckets.get(heading, []) or []
+            if not items:
+                story.append(Paragraph("—", body))
+                story.append(Spacer(1, 0.12 * inch))
+                continue
 
-        for it in items:
-            story.append(Paragraph("• " + _safe(it), body))
+            for it in items:
+                story.append(Paragraph("• " + _safe(it), body))
 
-        story.append(Spacer(1, 0.15 * inch))
+            story.append(Spacer(1, 0.15 * inch))
 
-    story.append(Spacer(1, 0.2 * inch))
+        story.append(Spacer(1, 0.2 * inch))
 
     # ---------------- Structured Follow-ups (optional) ----------------
     story.append(Paragraph("Follow-up experiments (structured, if present)", h2))
@@ -431,16 +561,20 @@ def _build_pdf(
                 story.append(Paragraph(_safe(fx), body))
             story.append(Spacer(1, 0.15 * inch))
     else:
-        story.append(Paragraph("No structured follow-up experiments returned.", body))
+        # fall back to the parsed display/sections text, but do NOT dump raw_text again
+        fallback_fu = gptv["follow_up_experiments"]
+        if fallback_fu.strip():
+            _render_bullets_from_text(story, fallback_fu, body, max_items=30)
+        else:
+            story.append(Paragraph("No structured follow-up experiments returned.", body))
 
     story.append(Spacer(1, 0.2 * inch))
     story.append(Paragraph(
         "<i>Note:</i> This PDF is a best-effort rendering of the triage JSON. "
-        "Keyword-based extraction is included so the report remains useful even when LLM output is unstructured.",
+        "Structured GPT fields are preferred when present; keyword-based extraction is used as a fallback.",
         body
     ))
 
     doc.build(story)
-
     
 
