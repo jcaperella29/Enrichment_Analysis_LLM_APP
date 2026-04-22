@@ -22,6 +22,42 @@ from reportlab.lib import colors
 # --------------------------
 # Small helpers
 # --------------------------
+def render_pubmed_context(story, triage_json, h2, body, Spacer, inch, Paragraph):
+    pubmed = triage_json.get("pubmed", {}) or {}
+    papers = pubmed.get("papers", []) or []
+
+    story.append(Paragraph("Literature Context (PubMed)", h2))
+
+    if not papers:
+        story.append(Paragraph("No PubMed papers available for this run.", body))
+        story.append(Spacer(1, 0.2 * inch))
+        return
+
+    for i, p in enumerate(papers[:5], start=1):
+        pmid = p.get("pmid", "") or ""
+        title = p.get("title", "") or "Untitled"
+        source = p.get("source", "") or ""
+        pubdate = p.get("pubdate", "") or ""
+        url = p.get("url", "") or ""
+
+        story.append(Paragraph(f"<b>{i}. {title}</b>", body))
+
+        meta = f"PMID: {pmid}"
+        if source:
+            meta += f" | {source}"
+        if pubdate:
+            meta += f" | {pubdate}"
+        story.append(Paragraph(meta, body))
+
+        if url:
+            story.append(Paragraph(f'<font color="blue">{url}</font>', body))
+
+        story.append(Spacer(1, 0.15 * inch))
+
+    story.append(Spacer(1, 0.25 * inch))
+
+
+
 def _safe(x: Any) -> str:
     if x is None:
         return ""
@@ -304,6 +340,19 @@ def _build_pdf(
     title: str,
     subtitle: Optional[str] = None,
 ) -> None:
+    from reportlab.platypus import (
+        SimpleDocTemplate,
+        Paragraph,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from datetime import datetime
+
     styles = getSampleStyleSheet()
     h1 = styles["Heading1"]
     h2 = styles["Heading2"]
@@ -332,249 +381,98 @@ def _build_pdf(
 
     # ---------------- Title ----------------
     story.append(Paragraph(_safe(title), h1))
+
     if subtitle:
         story.append(Paragraph(_safe(subtitle), body))
     else:
         story.append(Paragraph(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), body))
+
     story.append(Spacer(1, 0.25 * inch))
 
-    # ---------------- Phenotype & Context ----------------
-    phenotype = (
-        _get(triage_json, "programs.meta.phenotype")
-        or _get(triage_json, "gpt.phenotype")
-        or _get(triage_json, "phenotype")
-        or ""
+    # ---------------- PubMed Literature Context ----------------
+    render_pubmed_context(
+        story,
+        triage_json,
+        h2,
+        body,
+        Spacer,
+        inch,
+        Paragraph,
     )
-
-    story.append(Paragraph("Study context", h2))
-    if phenotype:
-        story.append(Paragraph(f"<b>Phenotype:</b> {_safe(phenotype)}", body))
-        story.append(Spacer(1, 0.12 * inch))
-
-    ctx = _get(triage_json, "gpt.experiment_context", None)
-    if not isinstance(ctx, dict):
-        ctx = _get(triage_json, "context", None)
-    if not isinstance(ctx, dict):
-        ctx = _get(triage_json, "programs.meta.experiment_context", {}) or {}
-
-    if isinstance(ctx, dict) and ctx:
-        rows = [["Field", "Value"]]
-        for k in ["organism", "assay", "tissue", "cell_type", "perturbation", "timepoint"]:
-            v = ctx.get(k)
-            if v is not None and str(v).strip():
-                rows.append([k, _safe(v)])
-
-        t = Table(rows, colWidths=[1.8 * inch, 4.7 * inch])
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2a44")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#2a3555")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#0f1626")),
-            ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#e8eefc")),
-        ]))
-        story.append(t)
-    else:
-        story.append(Paragraph("No structured context found.", body))
-
-    story.append(Spacer(1, 0.25 * inch))
 
     # ---------------- Structured GPT interpretation ----------------
     gptv = _structured_gpt_view(triage_json)
 
     story.append(Paragraph("Structured interpretation", h2))
 
-    structured_sections = [
-        ("Headline", gptv["headline"]),
-        ("Experimental Context", gptv["experimental_context"]),
-        ("Most Plausible Biology", gptv["most_plausible_biology"]),
-        ("Likely Reactive Programs", gptv["likely_reactive_programs"]),
-        ("Likely Artifacts / Confounders", gptv["likely_artifacts_confounders"]),
-        ("Evidence Strength and Rationale", gptv["evidence_strength_rationale"]),
-        ("Follow-Up Experiments", gptv["follow_up_experiments"]),
-        ("Main Uncertainties", gptv["main_uncertainties"]),
-    ]
+    if gptv.get("headline"):
+        story.append(Paragraph("<b>Headline</b>", h3))
+        story.append(Paragraph(_safe(gptv["headline"]), body))
+        story.append(Spacer(1, 0.15 * inch))
 
-    any_structured = any(v.strip() for _, v in structured_sections)
-    if any_structured:
-        for heading, content in structured_sections:
-            if not content.strip():
-                continue
-            story.append(Paragraph(heading, h3))
-            _render_bullets_from_text(story, content, body)
-            story.append(Spacer(1, 0.14 * inch))
-    else:
-        story.append(Paragraph("No structured GPT sections found.", body))
-        story.append(Spacer(1, 0.14 * inch))
+    if gptv.get("experimental_context"):
+        story.append(Paragraph("<b>Experimental Context</b>", h3))
+        story.append(Paragraph(_safe(gptv["experimental_context"]), body))
+        story.append(Spacer(1, 0.15 * inch))
 
-    story.append(Spacer(1, 0.20 * inch))
+    if gptv.get("most_plausible_biology"):
+        story.append(Paragraph("<b>Most Plausible Biology</b>", h3))
+        story.append(Paragraph(_safe(gptv["most_plausible_biology"]), body))
+        story.append(Spacer(1, 0.15 * inch))
 
-    # ---------------- Program classification (structured if present) ----------------
-    story.append(Paragraph("Program triage (structured, if present)", h2))
+    if gptv.get("likely_reactive_programs"):
+        story.append(Paragraph("<b>Likely Reactive Programs</b>", h3))
+        story.append(Paragraph(_safe(gptv["likely_reactive_programs"]), body))
+        story.append(Spacer(1, 0.15 * inch))
 
-    pc = _get(triage_json, "gpt.program_classification", None)
+    if gptv.get("likely_artifacts_confounded"):
+        story.append(Paragraph("<b>Likely Artifacts / Confounders</b>", h3))
+        story.append(Paragraph(_safe(gptv["likely_artifacts_confounded"]), body))
+        story.append(Spacer(1, 0.15 * inch))
 
-    if isinstance(pc, dict) and any(isinstance(v, list) and v for v in pc.values()):
-        for key, heading in [
-            ("likely_driver", "Likely drivers"),
-            ("likely_reactive", "Likely reactive"),
-            ("likely_artifact", "Likely artifacts / confounded"),
-        ]:
-            items = pc.get(key, []) or []
-            story.append(Paragraph(heading, h3))
+    if gptv.get("evidence_strength_and_rationale"):
+        story.append(Paragraph("<b>Evidence Strength and Rationale</b>", h3))
+        story.append(Paragraph(_safe(gptv["evidence_strength_and_rationale"]), body))
+        story.append(Spacer(1, 0.15 * inch))
 
-            if not items:
-                story.append(Paragraph("—", body))
-                story.append(Spacer(1, 0.12 * inch))
-                continue
+    if gptv.get("follow_up_experiments"):
+        story.append(Paragraph("<b>Follow-Up Experiments</b>", h3))
+        story.append(Paragraph(_safe(gptv["follow_up_experiments"]), body))
+        story.append(Spacer(1, 0.15 * inch))
 
-            rows = [["Program", "Rationale"]]
-            for it in items:
-                if isinstance(it, dict):
-                    rows.append([_safe(it.get("program", "")), _safe(it.get("why", ""))])
-                else:
-                    rows.append([_safe(it), ""])
-
-            t = Table(rows, colWidths=[2.3 * inch, 4.2 * inch])
-            t.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2a44")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#2a3555")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#0f1626")),
-                ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#e8eefc")),
-            ]))
-            story.append(t)
-            story.append(Spacer(1, 0.18 * inch))
-    else:
-        story.append(Paragraph("No structured program_classification found in gpt.program_classification.", body))
+    if gptv.get("main_uncertainties"):
+        story.append(Paragraph("<b>Main Uncertainties</b>", h3))
+        story.append(Paragraph(_safe(gptv["main_uncertainties"]), body))
+        story.append(Spacer(1, 0.15 * inch))
 
     story.append(Spacer(1, 0.25 * inch))
 
-    # ---------------- Programs table ----------------
-    story.append(Paragraph("Programs (unsupervised)", h2))
-    progs = _get(triage_json, "programs.programs", []) or []
-    if isinstance(progs, list) and progs:
-        rows = [["Program", "Score", "Members", "Top miRNAs / genes (subset)"]]
-        for p in progs[:20]:
-            if not isinstance(p, dict):
-                continue
-            rows.append([
-                _safe(p.get("program", "")),
-                f"{float(p.get('program_score', 0.0) or 0.0):.2f}",
-                _safe(p.get("member_count", "")),
-                ", ".join([_safe(x) for x in (p.get("top_genes") or [])[:12]]),
-            ])
+    # ---------------- Programs summary ----------------
+    programs = triage_json.get("programs", {}).get("programs", [])
 
-        t = Table(rows, colWidths=[2.2 * inch, 0.7 * inch, 0.8 * inch, 2.8 * inch])
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2a44")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#2a3555")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#0f1626")),
-            ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#e8eefc")),
-        ]))
-        story.append(t)
-    else:
-        story.append(Paragraph("No programs found in programs.programs.", body))
+    if programs:
+        story.append(Paragraph("Program summary", h2))
 
-    story.append(PageBreak())
+        for prog in programs[:8]:
+            name = _safe(prog.get("program", "Unnamed"))
+            size = prog.get("size", "")
 
-    # ---------------- Top Enriched Terms ----------------
-    story.append(Paragraph("Top enriched terms", h2))
-    triage_rows = _get(triage_json, "triage.rows", []) or []
+            story.append(Paragraph(f"<b>{name}</b> (n={size})", h3))
 
-    if isinstance(triage_rows, list) and triage_rows:
-        triage_rows_sorted = sorted(
-            triage_rows,
-            key=lambda r: (r.get("combined_pre_gpt_score", r.get("triage_score", 0)) if isinstance(r, dict) else 0),
-            reverse=True,
-        )[:50]
+            rep_terms = prog.get("representative_terms", [])
+            if rep_terms:
+                terms_str = ", ".join(
+                    _safe(t.get("term", "")) for t in rep_terms[:5]
+                )
+                story.append(Paragraph(f"Terms: {terms_str}", body))
 
-        table = [["Term", "Score", "Flags", "Overlap"]]
-        for r in triage_rows_sorted:
-            if not isinstance(r, dict):
-                continue
-            score = r.get("combined_pre_gpt_score", r.get("triage_score", 0)) or 0
-            flags = ", ".join([_safe(x) for x in (r.get("flags") or [])])
-            overlap = (
-                f"{r.get('overlap_k')}/{r.get('overlap_n')}"
-                if r.get("overlap_n") else _safe(r.get("overlap_k"))
-            )
-            table.append([_safe(r.get("term", "")), f"{float(score):.2f}", flags, overlap])
-
-        t = Table(table, colWidths=[3.2 * inch, 0.7 * inch, 1.6 * inch, 0.8 * inch])
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2a44")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#2a3555")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#0f1626")),
-            ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#e8eefc")),
-        ]))
-        story.append(t)
-    else:
-        story.append(Paragraph("No triage rows found in triage.rows.", body))
-
-    story.append(Spacer(1, 0.25 * inch))
-
-    # ---------------- Extracted interpretation (keyword-based, de-duplicated) ----------------
-        # ---------------- Extracted interpretation (keyword-based fallback only) ----------------
-    if not any(v.strip() for _, v in structured_sections):
-        story.append(Paragraph("Extracted interpretation (keyword-based)", h2))
-        buckets = _bucket_by_keywords(triage_json)
-
-        for heading in ["Drivers", "Reactive", "Artifacts", "Confounders", "Follow-up experiments", "Other notes"]:
-            story.append(Paragraph(heading, h3))
-            items = buckets.get(heading, []) or []
-            if not items:
-                story.append(Paragraph("—", body))
-                story.append(Spacer(1, 0.12 * inch))
-                continue
-
-            for it in items:
-                story.append(Paragraph("• " + _safe(it), body))
+            genes = prog.get("top_genes", [])
+            if genes:
+                gene_str = ", ".join(_safe(g) for g in genes[:10])
+                story.append(Paragraph(f"Top genes: {gene_str}", body))
 
             story.append(Spacer(1, 0.15 * inch))
 
-        story.append(Spacer(1, 0.2 * inch))
-
-    # ---------------- Structured Follow-ups (optional) ----------------
-    story.append(Paragraph("Follow-up experiments (structured, if present)", h2))
-    fus = _get(triage_json, "gpt.follow_up_experiments", []) or []
-
-    if isinstance(fus, list) and fus:
-        for fx in fus[:50]:
-            if isinstance(fx, dict):
-                story.append(Paragraph(f"<b>{_safe(fx.get('id',''))}</b>: {_safe(fx.get('hypothesis',''))}", body))
-                story.append(Paragraph(f"Perturbation: {_safe(fx.get('perturbation',''))}", body))
-                story.append(Paragraph(f"Readouts: {_safe(fx.get('readouts',''))}", body))
-                story.append(Paragraph(f"Controls: {_safe(fx.get('controls',''))}", body))
-                story.append(Paragraph(f"Expected if driver: {_safe(fx.get('expected_outcome_if_driver',''))}", body))
-                story.append(Paragraph(f"Expected if reactive/artifact: {_safe(fx.get('expected_outcome_if_reactive_or_artifact',''))}", body))
-            else:
-                story.append(Paragraph(_safe(fx), body))
-            story.append(Spacer(1, 0.15 * inch))
-    else:
-        # fall back to the parsed display/sections text, but do NOT dump raw_text again
-        fallback_fu = gptv["follow_up_experiments"]
-        if fallback_fu.strip():
-            _render_bullets_from_text(story, fallback_fu, body, max_items=30)
-        else:
-            story.append(Paragraph("No structured follow-up experiments returned.", body))
-
-    story.append(Spacer(1, 0.2 * inch))
-    story.append(Paragraph(
-        "<i>Note:</i> This PDF is a best-effort rendering of the triage JSON. "
-        "Structured GPT fields are preferred when present; keyword-based extraction is used as a fallback.",
-        body
-    ))
-
+    # ---------------- Build PDF ----------------
     doc.build(story)
-    
 
