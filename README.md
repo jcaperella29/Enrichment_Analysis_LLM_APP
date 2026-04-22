@@ -1,187 +1,230 @@
 # 🧬 Enrichment Analysis LLM App
 
-An AI-powered platform for interpreting enrichment results, prioritizing biological drivers vs confounders, and generating experiment-ready follow-up strategies using structured reasoning and literature-aware context.
+**AI-powered interpretation of enrichment results with built-in scientific skepticism, confounder awareness, and literature grounding.**
 
 ---
 
-## 🚀 Overview
+## 🚀 What this is
 
-This app takes enrichment outputs (e.g., GO, pathway analysis) and transforms them into:
+Most enrichment tools give you:
 
-- 🧠 **Structured biological interpretations**
-- ⚖️ **Driver vs reactive vs artifact classification**
-- 🔬 **Actionable follow-up experiments**
-- 📄 **Publication-style PDF reports**
+> a list of pathways
 
-It is designed to reduce the gap between statistical enrichment outputs and real biological insight.
+This app gives you:
 
----
-
-## 🧩 Key Features
-
-### 🧠 1. Structured Biological Reasoning
-- Identifies **likely drivers**, **reactive programs**, and **artifacts/confounders**
-- Applies assay-aware interpretation (RNA-seq, scRNA-seq, etc.)
-- Avoids overclaiming (e.g., RNA ≠ protein activity)
+> **a structured biological interpretation, evidence assessment, and an experiment plan — grounded in real literature**
 
 ---
 
-### 📚 2. Literature-Aware Interpretation
-- Integrates **PubMed (NCBI) retrieval**
-- Uses literature as **supporting context**, not blind authority
-- Gracefully handles missing or weak evidence
+## 🧠 Core Idea
+
+This system acts like a **careful computational biologist**, not a hype machine.
+
+It:
+- distinguishes **causal vs reactive vs artifact signals**
+- understands **assay limitations (e.g., RNA ≠ protein activity)**
+- checks results against **biological expectations**
+- pulls in **PubMed evidence**
+- proposes **real follow-up experiments**
 
 ---
 
-### 📊 3. Program-Level Summarization
-- Clusters enrichment terms into **biological programs**
-- Reduces redundancy and annotation noise
-- Highlights key genes driving enrichment
+## 🔥 What makes this different
+
+### ⚖️ 1. Driver vs Reactive vs Artifact reasoning
+
+Instead of:
+
+> “ER pathway enriched → ER is activated”
+
+You get:
+
+- Likely driver  
+- Likely reactive  
+- Likely artifact/confounded  
+
+With **explicit rationale**
 
 ---
 
-### 🔬 4. Follow-Up Experiment Design
-- Suggests:
-  - validation assays (qPCR, ELISA, Western, etc.)
-  - mechanistic experiments (ATAC-seq, PRO-seq, etc.)
-  - proper controls (e.g., antagonists, knockdown)
-- Bridges computational results → experimental action
+### 🧪 2. Built-in scientific guardrails
+
+The system knows things like:
+
+- RNA-seq cannot measure:
+  - protein activity
+  - phosphorylation
+  - pathway flux
+- cell cycle / ribosome signals are often confounders
+- single-gene enrichments are weak evidence
+
+👉 It actively prevents over-interpretation.
 
 ---
 
-### 📄 5. Clean PDF Reports
-- Structured interpretation sections:
-  - Headline
-  - Biological interpretation
-  - Confounders
-  - Evidence strength
-  - Follow-up experiments
-- Ready for sharing or discussion
+### 📚 3. Literature-aware interpretation (PubMed integrated)
+
+- Automatically retrieves relevant papers
+- Displays:
+  - titles
+  - PMIDs
+  - links
+- Uses literature as:
+  - **context**, not blind authority
+
+Example output:
+Dexamethasone inhibits repair of human airway epithelial cells…
+PMID: 23573276
 
 ---
 
-## 🏗️ Architecture
+### 📄 4. Clean, publication-style PDF reports
 
-Input enrichment table
+Each run produces:
+
+- Structured interpretation
+- Evidence strength assessment
+- Confounder analysis
+- Follow-up experiments
+- Literature context
+
+---
+
+### 🔬 5. Actionable follow-up experiments
+
+Not vague suggestions — real plans:
+
+- qPCR targets
+- ELISA readouts
+- perturbation strategies
+- proper controls
+
+---
+
+## 🏗️ Pipeline Overview
+
+Enrichment Table
 ↓
-Triage (term-level scoring + flags)
+Triage (flags, scoring, overlap quality)
 ↓
-Program summarization (clustered biology)
+Program Clustering (biological grouping)
 ↓
-PubMed retrieval (NCBI E-utilities)
+PubMed Retrieval (NCBI API)
 ↓
-LLM reasoning (playbook + evidence-weighted)
+LLM Reasoning (playbook + guardrails)
 ↓
-Structured output + PDF report
+Structured Output + PDF Report
 
 
 ---
 
-## 🧠 Reasoning Philosophy
+## 📥 Inputs
 
-This app is designed to behave like a careful computational biologist:
-
-- ❌ Avoids “pathway = activated” assumptions  
-- ⚠️ Flags:
-  - cell cycle artifacts
-  - translation noise
-  - single-gene enrichment inflation  
-- ⚖️ Distinguishes:
-  - **causal biology**
-  - **reactive responses**
-  - **technical/confounded signals**
-
----
-
-## 📦 Inputs
-
-- Enrichment results (CSV / table)
+- Enrichment results (GO / pathway tables)
 - Context:
   - organism
-  - assay type
+  - assay (RNA-seq, scRNA-seq, etc.)
   - tissue / cell type
   - perturbation
   - timepoint
-- Phenotype description
+- Phenotype of interest
 
 ---
 
 ## 📤 Outputs
 
-- Structured interpretation (JSON + UI)
-- Program-level summary
+- Structured interpretation
+- Program-level biology summary
 - Evidence-weighted reasoning
 - Follow-up experiment plan
-- Downloadable PDF report
+- PDF report with citations
 
 ---
 
-## 🔌 External Data Sources
+## 🧪 Example Use Case
 
-- **PubMed (NCBI E-utilities)**  
-  Used to provide literature-aware context for interpretation
+**Dataset:**  
+Dexamethasone-treated airway epithelial cells (RNA-seq)
 
-- **Gene Ontology / pathway databases**  
-  Used upstream in enrichment results
+**System conclusion:**
+- Weak ER/Golgi + proteostasis changes
+- Broad transcriptional remodeling
+- **No strong anti-inflammatory signature detected**
+- Likely reactive biology rather than direct drivers
+
+**Literature context:**
+- GILZ-mediated repair effects
+- IL-8 suppression studies
+- miR-375 / DUSP6 pathway
+
+👉 Matches expectations but **does not overclaim**
 
 ---
 
 ## ⚙️ Setup
 
-### 1. Install dependencies
+### Install
 
 ```bash
 pip install -r requirements.txt
 
-2. Set environment variables
+Environment Variables
+OPENAI_API_KEY=your_key
+NCBI_EMAIL=your_email@example.com
+NCBI_API_KEY=your_ncbi_key   # optional but recommended
+VECTOR_STORE_ID=your_vector_store_id  # optional
 
-export OPENAI_API_KEY=your_key_here
-export VECTOR_STORE_ID=your_vector_store_id   # optional (for RAG playbooks)
-export NCBI_EMAIL=your_email                  # recommended
-export NCBI_API_KEY=your_ncbi_key             # optional but faster
-3. Run the app
+Run
 python app.py
 
-🧪 Example Use Case
+open it at
+http://127.0.0.1:8050
 
-Dataset:
-Dexamethasone-treated airway epithelial cells (RNA-seq)
+🧠 Design Philosophy
 
-Output:
+This tool is built around one principle:
 
-Weak chromatin/transcriptional reprogramming
-Reactive ER/Golgi signatures
-No strong anti-inflammatory enrichment at 24h
-Follow-up experiments to validate GR activity
+Do not lie about biology.
+
+That means:
+
+No hallucinated pathway activation
+No overconfidence from weak enrichment
+No ignoring confounders
+No pretending RNA proves mechanism
 ⚠️ Limitations
-Enrichment is only as good as:
-input gene list
-statistical power
-pathway coverage
-RNA-seq cannot directly measure:
+Dependent on input enrichment quality
+RNA-based → cannot infer:
 protein activity
-phosphorylation
-pathway flux
-Literature retrieval is:
-query-dependent
-currently lightweight (v1)
+signaling dynamics
+PubMed retrieval:
+still lightweight (v1)
+not a full citation-ranking system yet
+
 🔮 Future Directions
-Stronger PubMed grounding (citation extraction + scoring)
-Integration with Reactome / MSigDB
-Confidence scoring across evidence layers
-UI improvements (cards, evidence badges)
+Stronger literature scoring / ranking
+Reactome / MSigDB integration
 Multi-dataset comparison
+Interactive UI improvements
+Confidence scoring across evidence layers
+🧬 Why this matters
 
-🧠 Why this matters
+Most tools stop at:
 
-Enrichment tools produce lists.
+“Here are enriched pathways”
 
-Scientists need decisions.
+This tool answers:
 
-This app helps bridge that gap by turning:
+“What is actually happening biologically, how confident are we, and what should we test next?”
 
-“statistical signal”
+👤 Author
 
-into:
+John Caperella
 
-“testable biological hypotheses”
+💬 Final note
+
+This is not just an LLM wrapper.
+
+It is an attempt to build:
+
+a reasoning layer between computational output and biological decision-making
