@@ -1,10 +1,9 @@
-# analysis/pipeline.py
-
 import pandas as pd
 from triage import triage_enrichment_table
 from program_summarizer import summarize_programs
 
 from reasoner import gpt5_reason_simple
+from pubmed_client import fetch_pubmed_context
 
 
 def run_enrichment_pipeline(
@@ -26,16 +25,26 @@ def run_enrichment_pipeline(
         phenotype=phenotype,
     )
 
-    # 3) GPT-5 + RAG reasoning on top (uses VECTOR_STORE_ID from env by default)
-    gpt = gpt5_reason_simple(
+    # 3) retrieve literature context from PubMed / NCBI
+    pubmed_context = fetch_pubmed_context(
         phenotype=phenotype,
         context=context,
         triage=tri,
         programs=programs,
     )
 
+    # 4) GPT-5 + playbook + optional RAG + PubMed evidence
+    gpt = gpt5_reason_simple(
+        phenotype=phenotype,
+        context=context,
+        triage=tri,
+        programs=programs,
+        pubmed_context=pubmed_context,
+    )
+
     return {
         "triage": tri,
         "programs": programs,
+        "pubmed": pubmed_context,
         "gpt": gpt,
     }
