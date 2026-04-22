@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, List, Optional
 import xml.etree.ElementTree as ET
 
@@ -99,18 +100,18 @@ def _build_pubmed_query(
         query_parts.append("(" + " AND ".join(ctx_bits) + ")")
 
     if top_terms:
-        term_clause = " OR ".join(f'"{t}"[Title/Abstract]' for t in top_terms[:4])
+        term_clause = " OR ".join(f'"{t}"[Title/Abstract]' for t in top_terms[:3])
         query_parts.append(f"({term_clause})")
 
     if top_genes:
-        gene_clause = " OR ".join(f"{g}[Title/Abstract]" for g in top_genes[:5])
+        gene_clause = " OR ".join(f"{g}[Title/Abstract]" for g in top_genes[:4])
         query_parts.append(f"({gene_clause})")
 
     if assay:
         query_parts.append(f'("{assay}"[Title/Abstract])')
 
     if not query_parts:
-        return "biomedical literature[Title/Abstract]"
+        return "biomedical literature"
 
     return " AND ".join(query_parts)
 
@@ -121,9 +122,6 @@ def _build_fallback_queries(
     context: Dict[str, Any],
     programs: Dict[str, Any],
 ) -> List[str]:
-    """
-    Ordered from stricter to looser, ending with very forgiving perturbation-centric queries.
-    """
     tissue = _norm_text(context.get("tissue"))
     cell_type = _norm_text(context.get("cell_type"))
     perturbation = _norm_text(context.get("perturbation"))
@@ -134,75 +132,41 @@ def _build_fallback_queries(
 
     queries: List[str] = []
 
-    # 1) strict
     queries.append(_build_pubmed_query(
         phenotype=phenotype,
         context=context,
         programs=programs,
     ))
 
-    # 2) phenotype + perturbation + cell/tissue
-    relaxed_parts = []
-    if phenotype:
-        relaxed_parts.append(f'"{phenotype}"[Title/Abstract]')
-    if perturbation:
-        relaxed_parts.append(f'"{perturbation}"[Title/Abstract]')
-    if cell_type:
-        relaxed_parts.append(f'"{cell_type}"[Title/Abstract]')
-    elif tissue:
-        relaxed_parts.append(f'"{tissue}"[Title/Abstract]')
-    if organism:
-        relaxed_parts.append(f'"{organism}"[Title/Abstract]')
-    if relaxed_parts:
-        queries.append(" AND ".join(relaxed_parts))
+    if phenotype and perturbation and (cell_type or tissue):
+        queries.append(
+            " ".join(x for x in [phenotype, perturbation, cell_type or tissue, organism] if x)
+        )
 
-    # 3) perturbation + cell/tissue
-    context_only_parts = []
-    if perturbation:
-        context_only_parts.append(f'"{perturbation}"[Title/Abstract]')
-    if cell_type:
-        context_only_parts.append(f'"{cell_type}"[Title/Abstract]')
-    elif tissue:
-        context_only_parts.append(f'"{tissue}"[Title/Abstract]')
-    if organism:
-        context_only_parts.append(f'"{organism}"[Title/Abstract]')
-    if context_only_parts:
-        queries.append(" AND ".join(context_only_parts))
-
-    # 4) perturbation + biology terms
-    biology_parts = []
-    if perturbation:
-        biology_parts.append(f'"{perturbation}"[Title/Abstract]')
-    if top_terms:
-        biology_parts.append("(" + " OR ".join(f'"{t}"[Title/Abstract]' for t in top_terms[:3]) + ")")
-    if cell_type:
-        biology_parts.append(f'"{cell_type}"[Title/Abstract]')
-    elif tissue:
-        biology_parts.append(f'"{tissue}"[Title/Abstract]')
-    if biology_parts:
-        queries.append(" AND ".join(biology_parts))
-
-    # 5) perturbation + top genes + cell/tissue
-    gene_parts = []
-    if perturbation:
-        gene_parts.append(f'"{perturbation}"[Title/Abstract]')
-    if top_genes:
-        gene_parts.append("(" + " OR ".join(f"{g}[Title/Abstract]" for g in top_genes[:4]) + ")")
-    if cell_type:
-        gene_parts.append(f'"{cell_type}"[Title/Abstract]')
-    elif tissue:
-        gene_parts.append(f'"{tissue}"[Title/Abstract]')
-    if gene_parts:
-        queries.append(" AND ".join(gene_parts))
-
-    # 6) very forgiving: perturbation + epithelium-ish context
     if perturbation and (cell_type or tissue):
-        broad_ctx = cell_type or tissue
-        queries.append(f'"{perturbation}"[Title/Abstract] AND "{broad_ctx}"[Title/Abstract]')
+        queries.append(
+            " ".join(x for x in [perturbation, cell_type or tissue, organism] if x)
+        )
 
-    # 7) ultra-forgiving: perturbation only
+    if perturbation and top_terms:
+        queries.append(
+            " ".join([perturbation] + top_terms[:3] + ([cell_type or tissue] if (cell_type or tissue) else []))
+        )
+
+    if perturbation and top_genes:
+        queries.append(
+            " ".join([perturbation] + top_genes[:4] + ([cell_type or tissue] if (cell_type or tissue) else []))
+        )
+
     if perturbation:
-        queries.append(f'"{perturbation}"[Title/Abstract]')
+        broad_ctx = cell_type or tissue or "airway epithelial"
+        queries.append(f"{perturbation} {broad_ctx}")
+
+    if perturbation:
+        queries.append(f"{perturbation} glucocorticoid airway epithelial")
+        queries.append(f"{perturbation} airway epithelium")
+        queries.append(f"{perturbation} epithelial cells")
+        queries.append(f"{perturbation}")
 
     seen = set()
     deduped = []
@@ -283,10 +247,6 @@ def _esummary(pmids: List[str]) -> List[Dict[str, Any]]:
 
 
 def _efetch_abstracts(pmids: List[str]) -> Dict[str, str]:
-    """
-    Proper XML parsing instead of regex scraping.
-    Returns partial results if some articles lack abstracts.
-    """
     if not pmids:
         return {}
 
@@ -300,7 +260,6 @@ def _efetch_abstracts(pmids: List[str]) -> Dict[str, str]:
     r.raise_for_status()
 
     abstracts: Dict[str, str] = {}
-
     root = ET.fromstring(r.text)
 
     for article in root.findall(".//PubmedArticle"):
@@ -326,6 +285,38 @@ def _efetch_abstracts(pmids: List[str]) -> Dict[str, str]:
     return abstracts
 
 
+def _with_retry_esummary(pmids: List[str], retries: int = 1, delay_s: float = 1.2) -> List[Dict[str, Any]]:
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return _esummary(pmids)
+        except requests.HTTPError as e:
+            last_exc = e
+            if "429" in str(e) and attempt < retries:
+                time.sleep(delay_s)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    return []
+
+
+def _with_retry_abstracts(pmids: List[str], retries: int = 1, delay_s: float = 1.2) -> Dict[str, str]:
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return _efetch_abstracts(pmids)
+        except requests.HTTPError as e:
+            last_exc = e
+            if "429" in str(e) and attempt < retries:
+                time.sleep(delay_s)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    return {}
+
+
 def fetch_pubmed_context(
     *,
     phenotype: str,
@@ -334,15 +325,6 @@ def fetch_pubmed_context(
     programs: Dict[str, Any],
     max_papers: int = 5,
 ) -> Dict[str, Any]:
-    """
-    Retrieve PubMed evidence relevant to the phenotype + context + programs.
-
-    Behavior:
-    - tries strict query first
-    - falls back to progressively looser queries
-    - always tries to return something if possible
-    - tolerates abstract parsing failures and returns summaries only
-    """
     query_candidates = _build_fallback_queries(
         phenotype=phenotype,
         context=context,
@@ -370,7 +352,6 @@ def fetch_pubmed_context(
             try:
                 pmids = _esearch(query, retmax=max_papers)
             except Exception as e:
-                # keep trying the next fallback query
                 out.setdefault("search_errors", []).append({
                     "query": query,
                     "error": str(e),
@@ -386,10 +367,37 @@ def fetch_pubmed_context(
             out["status"] = "no_hits"
             return out
 
-        summaries = _esummary(pmids)
+        # brief polite pause before metadata fetch
+        time.sleep(0.4)
 
         try:
-            abstracts = _efetch_abstracts(pmids)
+            summaries = _with_retry_esummary(pmids, retries=1, delay_s=1.2)
+        except Exception as e:
+            out["status"] = "partial_error"
+            out["query_used"] = used_query
+            out["query_strategy"] = used_strategy
+            out["error"] = f"esummary failed: {e}"
+
+            # fallback: still expose PMIDs and PubMed URLs
+            out["papers"] = [
+                {
+                    "pmid": pmid,
+                    "title": "",
+                    "pubdate": "",
+                    "source": "",
+                    "authors": [],
+                    "doi": "",
+                    "abstract": "",
+                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                }
+                for pmid in pmids
+            ]
+            return out
+
+        time.sleep(0.4)
+
+        try:
+            abstracts = _with_retry_abstracts(pmids, retries=1, delay_s=1.2)
             abstract_status = "ok"
         except Exception as e:
             abstracts = {}
