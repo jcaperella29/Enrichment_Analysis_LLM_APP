@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -19,13 +20,11 @@ Write clearly and in a structured way.
 
 PLAYBOOK_DIR = Path(__file__).resolve().parents[1] / "playbook"
 
-# Global playbooks are always loaded, regardless of assay
 GLOBAL_PLAYBOOKS = [
     "16_evidence_weighting_and_translation.md",
 ]
 
 ASSAY_TO_PLAYBOOK = {
-    # normalize keys on input; see normalize() below
     "bulk_rnaseq": ["01_assay_confounders_rnaseq.md"],
     "scrnaseq": ["02_assay_confounders_scrna.md"],
     "perturbseq": ["10_assay_confounders_perturbseq.md"],
@@ -36,6 +35,19 @@ ASSAY_TO_PLAYBOOK = {
         "14_epigenetic_vs_transcriptional_priors.md",
         "15_assay_confounders_dna_methylation.md",
     ],
+}
+
+SECTION_ALIASES = {
+    "headline": "headline",
+    "experimental context": "experimental_context",
+    "most plausible biology": "most_plausible_biology",
+    "likely reactive programs": "likely_reactive_programs",
+    "likely artifacts / confounders": "likely_artifacts_confounders",
+    "likely artifacts/confounders": "likely_artifacts_confounders",
+    "evidence strength and rationale": "evidence_strength_rationale",
+    "follow-up experiments": "follow_up_experiments",
+    "main uncertainties": "main_uncertainties",
+    "confounders and alternative explanations": "confounders_and_alternatives",
 }
 
 
@@ -73,6 +85,46 @@ def _load_playbook_md(assay: str) -> str:
     assay_files = ASSAY_TO_PLAYBOOK.get(assay_key, [])
     all_files = GLOBAL_PLAYBOOKS + assay_files
     return _load_md_files(all_files)
+
+
+def parse_gpt_markdown_sections(text: str) -> Dict[str, str]:
+    if not text or not text.strip():
+        return {}
+
+    pattern = re.compile(
+        r"(?ms)^##\s+(.+?)\s*$"      # heading
+        r"(.*?)"                     # body
+        r"(?=^##\s+.+?$|\Z)"         # next heading or end
+    )
+
+    sections: Dict[str, str] = {}
+    for match in pattern.finditer(text):
+        raw_heading = match.group(1).strip()
+        body = match.group(2).strip()
+
+        norm = raw_heading.lower()
+        key = SECTION_ALIASES.get(norm, re.sub(r"[^a-z0-9]+", "_", norm).strip("_"))
+
+        sections[key] = body
+
+    return sections
+
+
+def build_gpt_display_fields(gpt: Dict[str, Any]) -> Dict[str, str]:
+    sections = gpt.get("sections", {}) or {}
+    parsed = gpt.get("parsed", {}) or {}
+
+    return {
+        "headline": sections.get("headline") or parsed.get("headline", ""),
+        "experimental_context": sections.get("experimental_context") or parsed.get("experimental_context", ""),
+        "most_plausible_biology": sections.get("most_plausible_biology") or parsed.get("most_plausible_biology", ""),
+        "likely_reactive_programs": sections.get("likely_reactive_programs") or parsed.get("likely_reactive_programs", ""),
+        "likely_artifacts_confounders": sections.get("likely_artifacts_confounders") or parsed.get("likely_artifacts_confounders", ""),
+        "evidence_strength_rationale": sections.get("evidence_strength_rationale") or parsed.get("evidence_strength_rationale", ""),
+        "follow_up_experiments": sections.get("follow_up_experiments") or parsed.get("follow_up_experiments", ""),
+        "main_uncertainties": sections.get("main_uncertainties") or parsed.get("main_uncertainties", ""),
+        "raw_text": gpt.get("raw_text", ""),
+    }
 
 
 def gpt5_reason_simple(
@@ -161,6 +213,21 @@ Preferred output structure:
 
     try:
         parsed = json.loads(out)
-        return {"raw_text": out, "parsed": parsed}
+        gpt_result = {
+            "raw_text": out,
+            "parsed": parsed,
+            "sections": {},
+            "phenotype": phenotype,
+            "experiment_context": context,
+        }
     except Exception:
-        return {"raw_text": out}
+        sections = parse_gpt_markdown_sections(out)
+        gpt_result = {
+            "raw_text": out,
+            "sections": sections,
+            "phenotype": phenotype,
+            "experiment_context": context,
+        }
+
+    gpt_result["display"] = build_gpt_display_fields(gpt_result)
+    return gpt_result
