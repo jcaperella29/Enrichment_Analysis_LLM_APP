@@ -1,4 +1,4 @@
-from __future__ import annotations
+rom __future__ import annotations
 
 import os
 import json
@@ -16,6 +16,11 @@ Be strict about causal vs reactive vs artifact/confounders.
 Propose follow-up experiments with concrete readouts + controls.
 Use cautious, evidence-weighted language.
 Write clearly and in a structured way.
+When external literature evidence is provided, use it carefully:
+- treat it as supporting context, not automatic proof
+- note when literature aligns with the enrichment results
+- note when literature and the current data do not align
+- do not overclaim causality from literature alone
 """
 
 PLAYBOOK_DIR = Path(__file__).resolve().parents[1] / "playbook"
@@ -92,9 +97,9 @@ def parse_gpt_markdown_sections(text: str) -> Dict[str, str]:
         return {}
 
     pattern = re.compile(
-        r"(?ms)^##\s+(.+?)\s*$"      # heading
-        r"(.*?)"                     # body
-        r"(?=^##\s+.+?$|\Z)"         # next heading or end
+        r"(?ms)^##\s+(.+?)\s*$"
+        r"(.*?)"
+        r"(?=^##\s+.+?$|\Z)"
     )
 
     sections: Dict[str, str] = {}
@@ -127,12 +132,47 @@ def build_gpt_display_fields(gpt: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _compact_pubmed_context(pubmed_context: Optional[Dict[str, Any]], max_papers: int = 5) -> Dict[str, Any]:
+    """
+    Trim PubMed payload so the prompt stays useful and not bloated.
+    """
+    if not isinstance(pubmed_context, dict):
+        return {}
+
+    papers = pubmed_context.get("papers", []) or []
+    compact_papers = []
+
+    for p in papers[:max_papers]:
+        if not isinstance(p, dict):
+            continue
+        compact_papers.append({
+            "pmid": p.get("pmid", ""),
+            "title": p.get("title", ""),
+            "pubdate": p.get("pubdate", ""),
+            "source": p.get("source", ""),
+            "authors": (p.get("authors", []) or [])[:5],
+            "abstract": p.get("abstract", "")[:2500],
+            "url": p.get("url", ""),
+        })
+
+    return {
+        "status": pubmed_context.get("status", ""),
+        "source": pubmed_context.get("source", "PubMed via NCBI E-utilities"),
+        "query": pubmed_context.get("query", ""),
+        "top_terms_used": pubmed_context.get("top_terms_used", []),
+        "top_genes_used": pubmed_context.get("top_genes_used", []),
+        "papers": compact_papers,
+        "error": pubmed_context.get("error", ""),
+    }
+
+
 def gpt5_reason_simple(
     *,
     phenotype: str,
     context: Dict[str, Any],
     triage: Dict[str, Any],
     programs: Dict[str, Any],
+    pubmed_context: Optional[Dict[str, Any]] = None,
     vector_store_id: Optional[str] = None,
     model: str = "gpt-5",
 ) -> Dict[str, Any]:
@@ -147,6 +187,7 @@ def gpt5_reason_simple(
 
     assay = (context or {}).get("assay", "")
     playbook_md = _load_playbook_md(assay)
+    pubmed_payload = _compact_pubmed_context(pubmed_context)
 
     prompt = f"""
 Experiment context (echo this back briefly in your answer):
@@ -157,6 +198,9 @@ Phenotype:
 
 PLAYBOOK RULES (authoritative; follow these):
 {playbook_md if playbook_md else "(none found)"}
+
+External biomedical literature context (PubMed / NCBI):
+{json.dumps(pubmed_payload, indent=2)}
 
 Enrichment summary:
 {json.dumps(payload, indent=2)}
@@ -175,6 +219,10 @@ Instructions:
   - Weak
 - Explicitly distinguish likely cell-intrinsic biology from composition/stress/QC explanations where relevant.
 - Do not claim pathway activation from RNA alone when activity requires protein, phosphorylation, localization, or flux measurements.
+- Use the PubMed literature context only as supporting evidence.
+- If the literature aligns with the enrichment results, say so.
+- If the literature does not align with the enrichment results, say so explicitly.
+- Do not pretend the literature proves the current dataset's conclusions.
 - Include a section for confounders and alternative explanations.
 - Give follow-up experiments with specific readouts and controls.
 - Use cautious, evidence-weighted language.
@@ -219,6 +267,7 @@ Preferred output structure:
             "sections": {},
             "phenotype": phenotype,
             "experiment_context": context,
+            "pubmed_context": pubmed_payload,
         }
     except Exception:
         sections = parse_gpt_markdown_sections(out)
@@ -227,6 +276,7 @@ Preferred output structure:
             "sections": sections,
             "phenotype": phenotype,
             "experiment_context": context,
+            "pubmed_context": pubmed_payload,
         }
 
     gpt_result["display"] = build_gpt_display_fields(gpt_result)
