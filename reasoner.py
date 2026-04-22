@@ -1,4 +1,4 @@
-rom __future__ import annotations
+from __future__ import annotations
 
 import os
 import json
@@ -21,6 +21,7 @@ When external literature evidence is provided, use it carefully:
 - note when literature aligns with the enrichment results
 - note when literature and the current data do not align
 - do not overclaim causality from literature alone
+- when you refer to a retrieved paper, cite it inline as (PMID: XXXXXXXX)
 """
 
 PLAYBOOK_DIR = Path(__file__).resolve().parents[1] / "playbook"
@@ -204,7 +205,6 @@ External biomedical literature context (PubMed / NCBI):
 
 Enrichment summary:
 {json.dumps(payload, indent=2)}
-
 Instructions:
 - Give a concise headline.
 - Briefly restate the experimental context.
@@ -223,11 +223,20 @@ Instructions:
 - If the literature aligns with the enrichment results, say so.
 - If the literature does not align with the enrichment results, say so explicitly.
 - Do not pretend the literature proves the current dataset's conclusions.
+- If pubmed_context.papers contains any items:
+  - You MUST include a "Literature Context" section.
+  - You MUST list at least 2 retrieved papers.
+  - For each paper include:
+    - Title (shortened if needed)
+    - PMID in the format (PMID: XXXXXXXX)
+  - You MUST include these papers even if they are only general background.
+  - If the papers are not directly supportive, explicitly say:
+    "These papers provide general background but do not directly validate this dataset."
+- ONLY say "no PubMed papers were retrieved" if pubmed_context.papers is empty.
 - Include a section for confounders and alternative explanations.
 - Give follow-up experiments with specific readouts and controls.
 - Use cautious, evidence-weighted language.
 - Output cleanly formatted markdown.
-
 Preferred output structure:
 ## Headline
 ## Experimental Context
