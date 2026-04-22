@@ -1,34 +1,93 @@
-# app.py
-
 from dotenv import load_dotenv
 import os
 
-
 load_dotenv(override=True)
-from flask import Flask, request, jsonify, render_template
+
+from flask import Flask, request, jsonify, render_template, send_from_directory
 from werkzeug.exceptions import RequestEntityTooLarge
 import pandas as pd
-
 from datetime import datetime
+
 from summarizer import build_triage_pdf
-
-from flask import Flask, request, jsonify, send_from_directory
-
 from pipeline import run_enrichment_pipeline
 
 app = Flask(__name__)  # expects templates/index.html by default
 
 # ---- Upload limits ----
-# Set max upload size (bytes). Example: 25 MB
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25MB
 
-
-
 REPORTS_DIR = os.environ.get("REPORTS_DIR") or os.path.join("/tmp", "reports")
+
+
+def _safe_get(d: dict, *path, default=None):
+    cur = d
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    return cur
+
+
+def _build_ui_fields(result: dict, phenotype: str, context: dict) -> dict:
+    gpt = result.get("gpt", {}) or {}
+    display = gpt.get("display", {}) or {}
+
+    programs = result.get("programs", {}) or {}
+    program_list = programs.get("programs", []) or []
+
+    top_program = ""
+    if program_list and isinstance(program_list[0], dict):
+        top_program = (
+            program_list[0].get("label")
+            or program_list[0].get("program")
+            or program_list[0].get("name")
+            or ""
+        )
+
+    gpt_summary = "\n\n".join(
+        x for x in [
+            display.get("headline", ""),
+            display.get("experimental_context", ""),
+            display.get("most_plausible_biology", ""),
+        ] if x
+    ).strip()
+
+    ranked_programs = "\n\n".join(
+        x for x in [
+            display.get("most_plausible_biology", ""),
+            display.get("likely_reactive_programs", ""),
+            display.get("evidence_strength_rationale", ""),
+        ] if x
+    ).strip()
+
+    confounders = "\n\n".join(
+        x for x in [
+            display.get("likely_artifacts_confounders", ""),
+            display.get("main_uncertainties", ""),
+        ] if x
+    ).strip()
+
+    follow_ups = display.get("follow_up_experiments", "")
+
+    return {
+        "phenotype": phenotype,
+        "context": context,
+        "programs_returned": len(program_list),
+        "top_program": top_program,
+        "gpt_summary": gpt_summary,
+        "ranked_programs": ranked_programs,
+        "confounders_to_watch": confounders,
+        "follow_up_experiments": follow_ups,
+        "headline": display.get("headline", ""),
+        "experimental_context": display.get("experimental_context", ""),
+        "raw_gpt_text": gpt.get("raw_text", ""),
+    }
+
 
 @app.get("/reports/<path:filename>")
 def get_report(filename):
     return send_from_directory(REPORTS_DIR, filename)
+
 
 @app.errorhandler(RequestEntityTooLarge)
 def handle_file_too_large(e):
@@ -73,6 +132,13 @@ def analyze():
             context=context,
         )
 
+        # Make phenotype/context available at top level for downstream consumers
+        result["phenotype"] = phenotype
+        result["context"] = context
+
+        # Add UI-friendly fields so frontend cards do not need to scrape raw markdown
+        result["gpt_display"] = _build_ui_fields(result, phenotype, context)
+
         return jsonify(result)
 
     except Exception as e:
@@ -82,8 +148,6 @@ def analyze():
             "error": str(e),
             "traceback": traceback.format_exc(),
         }), 500
-
-
 
 
 @app.post("/summarize")
@@ -97,28 +161,23 @@ def summarize():
         if not isinstance(triage_json, dict):
             return jsonify({"error": "Expected JSON body (triage result dict)"}), 400
 
-        # Make sure reports dir exists (MUST be writable in Apptainer)
         os.makedirs(REPORTS_DIR, exist_ok=True)
 
-        # Unique filename
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         pdf_filename = f"triage_report_{ts}.pdf"
         pdf_path = os.path.join(REPORTS_DIR, pdf_filename)
 
-        # -------------------------------
-        # PATCH: normalize phenotype/context for PDF
-        # -------------------------------
         phenotype = (
-            triage_json.get("programs", {}).get("meta", {}).get("phenotype")
-            or triage_json.get("gpt", {}).get("phenotype")
+            _safe_get(triage_json, "programs", "meta", "phenotype")
+            or _safe_get(triage_json, "gpt", "phenotype")
             or triage_json.get("phenotype")
             or ""
         )
 
         context = (
             triage_json.get("context")
-            or triage_json.get("programs", {}).get("meta", {}).get("context")
-            or triage_json.get("gpt", {}).get("experiment_context")
+            or _safe_get(triage_json, "programs", "meta", "context")
+            or _safe_get(triage_json, "gpt", "experiment_context")
             or {}
         )
         if not isinstance(context, dict):
@@ -126,11 +185,9 @@ def summarize():
 
         triage_json.setdefault("gpt", {})
 
-        # ensure phenotype available under gpt for PDF fallback
         if phenotype and not triage_json["gpt"].get("phenotype"):
             triage_json["gpt"]["phenotype"] = phenotype
 
-        # ensure experiment_context exists in the exact spot the PDF expects
         triage_json["gpt"]["experiment_context"] = {
             "organism": context.get("organism", ""),
             "assay": context.get("assay", ""),
@@ -139,19 +196,18 @@ def summarize():
             "perturbation": context.get("perturbation", ""),
             "timepoint": context.get("timepoint", ""),
         }
-        # -------------------------------
-        # END PATCH
-        # -------------------------------
 
-        # Build PDF
+        assay = context.get("assay", "").strip()
+
+        title = f"{assay} Enrichment Triage Report" if assay else "Enrichment Triage Report"
+
         build_triage_pdf(
-            triage_json=triage_json,
-            out_pdf_path=pdf_path,
-            title="miRNA Enrichment Triage",
-            subtitle=f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+         triage_json=triage_json,
+         out_pdf_path=pdf_path,
+         title=title,
+         subtitle=f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
-        # Serve from our writable folder via Flask route
         pdf_url = f"/reports/{pdf_filename}"
         return jsonify({"pdf_url": pdf_url})
 
@@ -166,4 +222,3 @@ def summarize():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
-
