@@ -1,4 +1,4 @@
-# program_summarizer.py
+    # program_summarizer.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -80,6 +80,30 @@ class ProgramSummaryConfig:
 def default_program_rules() -> List[ProgramRule]:
     # You can expand this list over time; this is a strong starting set.
     return [
+        ProgramRule(
+            name="GLUCOCORTICOID_GR_RESPONSE",
+            term_keywords=[
+                "glucocorticoid", "dexamethasone", "corticosteroid",
+                "steroid hormone", "glucocorticoid receptor", "nr3c1",
+                "response to steroid", "response to corticosteroid",
+                "airway smooth muscle response to corticosteroid",
+            ],
+            gene_regex=[
+                r"^FKBP5$", r"^TSC22D3$", r"^DUSP1$", r"^SGK1$",
+                r"^PER1$", r"^KLF9$", r"^ZBTB16$", r"^NR3C1$",
+                r"^CRISPLD2$", r"^BCL6$",
+            ],
+        ),
+        ProgramRule(
+            name="MAPK_STRESS_KINASE_ATTENUATION",
+            term_keywords=[
+                "mapk", "stress kinase", "p38", "jnk", "map kinase",
+                "phosphatase", "kinase attenuation", "stress-kinase",
+            ],
+            gene_regex=[
+                r"^DUSP\d+$", r"^MAPK", r"^FOS$", r"^JUN$", r"^KLF9$",
+            ],
+        ),
         ProgramRule(
             name="ECM_FIBROSIS",
             term_keywords=["extracellular matrix", "collagen", "ecm", "integrin", "focal adhesion", "tgf", "wound healing", "myofibroblast"],
@@ -267,3 +291,4 @@ def summarize_programs(
             "phenotype": phenotype or "",
         }
     }
+
