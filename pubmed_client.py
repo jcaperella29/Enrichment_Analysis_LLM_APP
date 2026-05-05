@@ -1,4 +1,4 @@
-from __future__ import annotations
+rom __future__ import annotations
 
 import os
 import time
@@ -159,11 +159,33 @@ def _build_fallback_queries(
         )
 
     if perturbation:
-        broad_ctx = cell_type or tissue or "airway epithelial"
+        broad_ctx = cell_type or tissue or "airway"
         queries.append(f"{perturbation} {broad_ctx}")
 
+        # Productization patch 2: domain-aware fallback queries for the common
+        # Bioconductor airway/dexamethasone use case and related steroid-response
+        # datasets. These reduce drift toward generic airway inflammation papers.
+        ctx_low = " ".join([phenotype, tissue, cell_type, perturbation]).lower()
+        looks_like_dex_airway = (
+            any(x in ctx_low for x in ["dexamethasone", "glucocorticoid", "corticosteroid"])
+            and "airway" in ctx_low
+        )
+        if looks_like_dex_airway:
+            queries.extend([
+                "dexamethasone airway smooth muscle RNA-seq glucocorticoid",
+                "dexamethasone airway smooth muscle FKBP5 TSC22D3 DUSP1 SGK1",
+                "glucocorticoid receptor airway smooth muscle transcriptome",
+                "dexamethasone human airway smooth muscle cytokine function CRISPLD2",
+                "dexamethasone TNF alpha human airway smooth muscle NF-kappaB",
+            ])
+
     if perturbation:
-        queries.append(f"{perturbation} glucocorticoid airway epithelial")
+        # Generic fallbacks, ordered from more specific to broader.
+        if cell_type:
+            queries.append(f"{perturbation} glucocorticoid {cell_type}")
+        if tissue:
+            queries.append(f"{perturbation} glucocorticoid {tissue}")
+        queries.append(f"{perturbation} airway smooth muscle")
         queries.append(f"{perturbation} airway epithelium")
         queries.append(f"{perturbation} epithelial cells")
         queries.append(f"{perturbation}")
