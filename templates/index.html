@@ -1,4 +1,4 @@
-<!doctype html>
+!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -610,11 +610,35 @@
     });
   }
 
-  // ---- Normalize YOUR JSON structure into the UI's expected format ----
-  function normalizeGPT(gpt, programsMeta) {
+  // ---- Normalize structured GPT / claim output into the UI's expected format ----
+  function normalizeGPT(gpt, programsMeta, claims=[]) {
+    if (claims && claims.length) {
+      const ranked_programs = claims.map(c => ({
+        program: c.program || "Unassigned",
+        verdict: c.role || "Uncertain",
+        why: [c.claim, c.rationale].filter(Boolean).join(" — "),
+        followups: (c.validation || []).map((f, i) => ({
+          priority: i + 1,
+          experiment: f.experiment || "Follow-up",
+          readout: f.readout || "",
+          controls: f.control || "",
+          expected_if_causal: f.expected_result_if_causal || ""
+        }))
+      }));
+
+      const confounders_to_watch = [];
+      claims.forEach(c => (c.confounders || []).forEach(x => {
+        if (x && !confounders_to_watch.includes(x)) confounders_to_watch.push(x);
+      }));
+
+      const headline = gpt?.display?.headline || gpt?.parsed?.headline || "Evidence-aware triage ready";
+      const notes = gpt?.display?.executive_summary || gpt?.parsed?.executive_summary || "Structured claims generated with evidence links, caveats, and validation plans.";
+      return { headline, notes, confounders_to_watch: confounders_to_watch.slice(0, 12), ranked_programs };
+    }
+
     if (!gpt) return null;
 
-    // Flatten classification buckets -> ranked list
+    // Backward-compatible fallback for older JSON shapes
     const buckets = gpt.program_classification || {};
     const order = [
       ["likely_driver", "Likely driver"],
@@ -630,8 +654,6 @@
           program: x.program,
           verdict: label,
           why: x.why || "",
-          key_genes: [], // optional (you already show key genes in non-GPT program cards)
-          supporting_terms: [],
           followups: (gpt.follow_up_experiments || []).slice(0, 3).map((f, i) => ({
             priority: i + 1,
             experiment: f.perturbation || f.hypothesis || f.id || "Follow-up",
@@ -643,16 +665,12 @@
       });
     });
 
-    // Confounders: pull key_rules snippets
     const confounders_to_watch = [];
     (gpt.applied_rules || []).forEach(r => {
       (r.key_rules || []).forEach(k => confounders_to_watch.push(k));
     });
 
-    const headline =
-      (gpt.phenotype || programsMeta?.phenotype || "GPT triage ready")
-        .slice(0, 120);
-
+    const headline = (gpt.phenotype || programsMeta?.phenotype || "GPT triage ready").slice(0, 120);
     const notes = gpt.experiment_context
       ? `Context: ${gpt.experiment_context.assay || "—"} · ${gpt.experiment_context.organism || "—"} · ${gpt.experiment_context.tissue || "—"} · ${gpt.experiment_context.cell_type || "—"}`
       : "";
@@ -777,7 +795,7 @@
 
       // meta
       const nprog = data?.programs?.programs?.length ?? 0;
-      document.getElementById("metaPill").textContent = `programs ${nprog}`;
+      document.getElementById("metaPill").textContent = `programs ${nprog} · claims ${data?.claims?.length || 0}`;
 
       // KPIs
       document.getElementById("kpiPrograms").textContent = nprog;
@@ -794,7 +812,7 @@
       }));
 
       // GPT rendering (NOW WIRED)
-      const gptNorm = normalizeGPT(data?.gpt, data?.programs?.meta);
+      const gptNorm = normalizeGPT(data?.gpt, data?.programs?.meta, data?.claims || []);
       renderGPT(gptNorm);
 
       document.getElementById("rawJson").textContent = JSON.stringify(data, null, 2);
