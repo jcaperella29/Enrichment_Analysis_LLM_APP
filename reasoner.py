@@ -7,15 +7,16 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from openai import OpenAI
+from schemas import claim_schema_for_prompt
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 SYSTEM = """You are a senior computational biologist.
-Your job: interpret enrichment results and prioritize plausible biology for the user’s phenotype.
+Your job is to convert enrichment results into cautious, auditable biological interpretation claims.
 Be strict about causal vs reactive vs artifact/confounders.
-Propose follow-up experiments with concrete readouts + controls.
+Propose follow-up experiments with concrete readouts and controls.
 Use cautious, evidence-weighted language.
-Write clearly and in a structured way.
+Never claim causality from enrichment alone.
 When external literature evidence is provided, use it carefully:
 - treat it as supporting context, not automatic proof
 - note when literature aligns with the enrichment results
@@ -24,10 +25,18 @@ When external literature evidence is provided, use it carefully:
 - when you refer to a retrieved paper, cite it inline as (PMID: XXXXXXXX)
 """
 
-PLAYBOOK_DIR = Path(__file__).resolve().parents[1] / "playbook"
+# Works when reasoner.py lives at project root; also tolerates older nested layout.
+_HERE = Path(__file__).resolve().parent
+PLAYBOOK_DIR = _HERE / "playbook"
+if not PLAYBOOK_DIR.exists():
+    PLAYBOOK_DIR = _HERE.parent / "playbook"
 
 GLOBAL_PLAYBOOKS = [
-    "16_evidence_weighting_and_translation.md",
+    "16_evidence_weighting_and_translation.md",   # preferred production name
+    "6_evidence_weighting_and_translation.md",    # tolerated older/uploaded name
+    "03_growth_axis_and_overlap_rules.md",
+    "08_tissue_celltype_prior_map.md",
+    "09_followup_experiment_menu.md",
 ]
 
 ASSAY_TO_PLAYBOOK = {
@@ -45,6 +54,7 @@ ASSAY_TO_PLAYBOOK = {
 
 SECTION_ALIASES = {
     "headline": "headline",
+    "executive summary": "executive_summary",
     "experimental context": "experimental_context",
     "most plausible biology": "most_plausible_biology",
     "likely reactive programs": "likely_reactive_programs",
@@ -53,16 +63,16 @@ SECTION_ALIASES = {
     "evidence strength and rationale": "evidence_strength_rationale",
     "follow-up experiments": "follow_up_experiments",
     "main uncertainties": "main_uncertainties",
-    "confounders and alternative explanations": "confounders_and_alternatives",
+    "literature context": "literature_context",
 }
 
 
 def _norm_assay(s: str) -> str:
     s = (s or "").strip().lower()
     s = s.replace("-", "").replace(" ", "").replace("_", "")
-    if s in ("bulkrnaseq",):
+    if s in ("bulkrnaseq", "rnaseq"):
         return "bulk_rnaseq"
-    if s in ("scrnaseq",):
+    if s in ("scrnaseq", "singlecellrnaseq"):
         return "scrnaseq"
     if s in ("perturbseq",):
         return "perturbseq"
@@ -72,17 +82,19 @@ def _norm_assay(s: str) -> str:
         return "mirnaseq"
     if s in ("gwas",):
         return "gwas"
-    if s in ("dnamethylation",):
+    if s in ("dnamethylation", "methylation"):
         return "dna_methylation"
     return s
 
 
 def _load_md_files(files: List[str]) -> str:
     chunks: List[str] = []
+    seen_paths = set()
     for fn in files:
         p = PLAYBOOK_DIR / fn
-        if p.exists():
+        if p.exists() and p not in seen_paths:
             chunks.append(f"# {fn}\n\n" + p.read_text(encoding="utf-8"))
+            seen_paths.add(p)
     return "\n\n---\n\n".join(chunks).strip()
 
 
@@ -96,66 +108,68 @@ def _load_playbook_md(assay: str) -> str:
 def parse_gpt_markdown_sections(text: str) -> Dict[str, str]:
     if not text or not text.strip():
         return {}
-
-    pattern = re.compile(
-        r"(?ms)^##\s+(.+?)\s*$"
-        r"(.*?)"
-        r"(?=^##\s+.+?$|\Z)"
-    )
-
+    pattern = re.compile(r"(?ms)^##\s+(.+?)\s*$(.*?)(?=^##\s+.+?$|\Z)")
     sections: Dict[str, str] = {}
     for match in pattern.finditer(text):
         raw_heading = match.group(1).strip()
         body = match.group(2).strip()
-
         norm = raw_heading.lower()
         key = SECTION_ALIASES.get(norm, re.sub(r"[^a-z0-9]+", "_", norm).strip("_"))
-
         sections[key] = body
-
     return sections
 
 
 def build_gpt_display_fields(gpt: Dict[str, Any]) -> Dict[str, str]:
-    sections = gpt.get("sections", {}) or {}
     parsed = gpt.get("parsed", {}) or {}
+    sections = gpt.get("sections", {}) or {}
+    claims = parsed.get("claims", []) or []
+
+    ranked = []
+    confs = []
+    validations = []
+    for c in claims:
+        ranked.append(f"{c.get('program', '')}: {c.get('role', 'Uncertain')} / {c.get('evidence_strength', 'Weak')} — {c.get('claim', '')}")
+        for x in c.get("confounders", []) or []:
+            if x not in confs:
+                confs.append(x)
+        for v in c.get("validation", []) or []:
+            exp = v.get("experiment", "")
+            readout = v.get("readout", "")
+            control = v.get("control", "")
+            if exp:
+                validations.append(f"{exp}; readout: {readout}; control: {control}")
 
     return {
-        "headline": sections.get("headline") or parsed.get("headline", ""),
-        "experimental_context": sections.get("experimental_context") or parsed.get("experimental_context", ""),
-        "most_plausible_biology": sections.get("most_plausible_biology") or parsed.get("most_plausible_biology", ""),
-        "likely_reactive_programs": sections.get("likely_reactive_programs") or parsed.get("likely_reactive_programs", ""),
-        "likely_artifacts_confounders": sections.get("likely_artifacts_confounders") or parsed.get("likely_artifacts_confounders", ""),
-        "evidence_strength_rationale": sections.get("evidence_strength_rationale") or parsed.get("evidence_strength_rationale", ""),
-        "follow_up_experiments": sections.get("follow_up_experiments") or parsed.get("follow_up_experiments", ""),
-        "main_uncertainties": sections.get("main_uncertainties") or parsed.get("main_uncertainties", ""),
+        "headline": parsed.get("headline") or sections.get("headline", ""),
+        "experimental_context": sections.get("experimental_context", ""),
+        "executive_summary": parsed.get("executive_summary", ""),
+        "most_plausible_biology": "\n".join(ranked) or sections.get("most_plausible_biology", ""),
+        "likely_reactive_programs": sections.get("likely_reactive_programs", ""),
+        "likely_artifacts_confounders": "\n".join(confs) or sections.get("likely_artifacts_confounders", ""),
+        "evidence_strength_rationale": sections.get("evidence_strength_rationale", ""),
+        "follow_up_experiments": "\n".join(validations) or sections.get("follow_up_experiments", ""),
+        "main_uncertainties": "\n".join(parsed.get("assay_limitations", []) or []) or sections.get("main_uncertainties", ""),
         "raw_text": gpt.get("raw_text", ""),
     }
 
 
 def _compact_pubmed_context(pubmed_context: Optional[Dict[str, Any]], max_papers: int = 5) -> Dict[str, Any]:
-    """
-    Trim PubMed payload so the prompt stays useful and not bloated.
-    """
     if not isinstance(pubmed_context, dict):
         return {}
-
     papers = pubmed_context.get("papers", []) or []
     compact_papers = []
-
     for p in papers[:max_papers]:
         if not isinstance(p, dict):
             continue
         compact_papers.append({
-            "pmid": p.get("pmid", ""),
+            "pmid": str(p.get("pmid", "")),
             "title": p.get("title", ""),
             "pubdate": p.get("pubdate", ""),
             "source": p.get("source", ""),
             "authors": (p.get("authors", []) or [])[:5],
-            "abstract": p.get("abstract", "")[:2500],
+            "abstract": (p.get("abstract", "") or "")[:2500],
             "url": p.get("url", ""),
         })
-
     return {
         "status": pubmed_context.get("status", ""),
         "source": pubmed_context.get("source", "PubMed via NCBI E-utilities"),
@@ -165,6 +179,32 @@ def _compact_pubmed_context(pubmed_context: Optional[Dict[str, Any]], max_papers
         "papers": compact_papers,
         "error": pubmed_context.get("error", ""),
     }
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", text or "", flags=re.S)
+    if not m:
+        raise ValueError("No JSON object found in model response.")
+    return json.loads(m.group(0))
+
+
+def _markdown_from_parsed(parsed: Dict[str, Any]) -> str:
+    if parsed.get("markdown_report"):
+        return parsed["markdown_report"]
+    lines = ["## Headline", parsed.get("headline", ""), "", "## Executive Summary", parsed.get("executive_summary", "")]
+    lines.append("\n## Claims")
+    for c in parsed.get("claims", []) or []:
+        lines.append(f"- **{c.get('program', '')}** [{c.get('role', 'Uncertain')} / {c.get('evidence_strength', 'Weak')}]: {c.get('claim', '')}")
+    lines.append("\n## Main Confounders")
+    for x in parsed.get("main_confounders", []) or []:
+        lines.append(f"- {x}")
+    lines.append("\n## Next Best Experiment")
+    lines.append(parsed.get("next_best_experiment", ""))
+    return "\n".join(lines).strip()
 
 
 def gpt5_reason_simple(
@@ -189,9 +229,15 @@ def gpt5_reason_simple(
     assay = (context or {}).get("assay", "")
     playbook_md = _load_playbook_md(assay)
     pubmed_payload = _compact_pubmed_context(pubmed_context)
+    schema = claim_schema_for_prompt()
 
     prompt = f"""
-Experiment context (echo this back briefly in your answer):
+Return ONLY valid JSON matching this schema. Do not wrap it in markdown.
+
+JSON schema:
+{json.dumps(schema, indent=2)}
+
+Experiment context:
 {json.dumps(context, indent=2)}
 
 Phenotype:
@@ -205,47 +251,16 @@ External biomedical literature context (PubMed / NCBI):
 
 Enrichment summary:
 {json.dumps(payload, indent=2)}
-Instructions:
-- Give a concise headline.
-- Briefly restate the experimental context.
-- For each major biological program, classify it as one of:
-  - Likely driver
-  - Likely reactive
-  - Likely artifact/confounded
-  - Uncertain
-- For each major interpretation, indicate evidence strength as:
-  - Stronger
-  - Moderate
-  - Weak
-- Explicitly distinguish likely cell-intrinsic biology from composition/stress/QC explanations where relevant.
-- Do not claim pathway activation from RNA alone when activity requires protein, phosphorylation, localization, or flux measurements.
-- Use the PubMed literature context only as supporting evidence.
-- If the literature aligns with the enrichment results, say so.
-- If the literature does not align with the enrichment results, say so explicitly.
-- Do not pretend the literature proves the current dataset's conclusions.
-- If pubmed_context.papers contains any items:
-  - You MUST include a "Literature Context" section.
-  - You MUST list at least 2 retrieved papers.
-  - For each paper include:
-    - Title (shortened if needed)
-    - PMID in the format (PMID: XXXXXXXX)
-  - You MUST include these papers even if they are only general background.
-  - If the papers are not directly supportive, explicitly say:
-    "These papers provide general background but do not directly validate this dataset."
-- ONLY say "no PubMed papers were retrieved" if pubmed_context.papers is empty.
-- Include a section for confounders and alternative explanations.
-- Give follow-up experiments with specific readouts and controls.
-- Use cautious, evidence-weighted language.
-- Output cleanly formatted markdown.
-Preferred output structure:
-## Headline
-## Experimental Context
-## Most Plausible Biology
-## Likely Reactive Programs
-## Likely Artifacts / Confounders
-## Evidence Strength and Rationale
-## Follow-Up Experiments
-## Main Uncertainties
+
+Required interpretation behavior:
+- Create 3 to 8 InterpretationClaim-style claims.
+- Tie every claim to supporting terms, row IDs, genes, and PMIDs when available.
+- If PMIDs are only background, set literature_status to background or general_support, not direct_support.
+- Separate likely drivers, likely reactive programs, likely artifact/confounded programs, and uncertain programs.
+- Assign evidence_strength as Stronger, Moderate, or Weak.
+- Every claim needs at least one validation experiment with a readout and control.
+- Include assay limitations and top confounders.
+- Use cautious language: consistent with, suggestive of, cannot distinguish from, requires validation.
 """.strip()
 
     messages = [
@@ -257,35 +272,52 @@ Preferred output structure:
     if vs_id:
         tools = [{"type": "file_search", "vector_store_ids": [vs_id]}]
 
-    resp = client.responses.create(
-        model=model,
-        input=messages,
-        tools=tools,
-        text={"format": {"type": "text"}},
-    )
+    # Prefer JSON mode when available; fall back to text for older SDK/model combinations.
+    try:
+        resp = client.responses.create(
+            model=model,
+            input=messages,
+            tools=tools,
+            text={"format": {"type": "json_schema", "name": "enrichment_interpretation", "schema": schema, "strict": False}},
+        )
+    except Exception:
+        resp = client.responses.create(
+            model=model,
+            input=messages,
+            tools=tools,
+            text={"format": {"type": "text"}},
+        )
 
     out = getattr(resp, "output_text", None)
     if not out:
         raise RuntimeError(f"No output_text returned. Raw response: {resp}")
 
     try:
-        parsed = json.loads(out)
+        parsed = _extract_json_object(out)
+        raw_text = _markdown_from_parsed(parsed)
+        sections = parse_gpt_markdown_sections(raw_text)
         gpt_result = {
-            "raw_text": out,
+            "model": model,
+            "raw_text": raw_text,
+            "raw_json_text": out,
             "parsed": parsed,
-            "sections": {},
-            "phenotype": phenotype,
-            "experiment_context": context,
-            "pubmed_context": pubmed_payload,
-        }
-    except Exception:
-        sections = parse_gpt_markdown_sections(out)
-        gpt_result = {
-            "raw_text": out,
             "sections": sections,
             "phenotype": phenotype,
             "experiment_context": context,
             "pubmed_context": pubmed_payload,
+            "playbook_files_loaded_from": str(PLAYBOOK_DIR),
+        }
+    except Exception:
+        sections = parse_gpt_markdown_sections(out)
+        gpt_result = {
+            "model": model,
+            "raw_text": out,
+            "sections": sections,
+            "parsed": {},
+            "phenotype": phenotype,
+            "experiment_context": context,
+            "pubmed_context": pubmed_payload,
+            "playbook_files_loaded_from": str(PLAYBOOK_DIR),
         }
 
     gpt_result["display"] = build_gpt_display_fields(gpt_result)
