@@ -4,6 +4,8 @@ from program_summarizer import summarize_programs
 
 from reasoner import gpt5_reason_simple
 from pubmed_client import fetch_pubmed_context
+from input_validation import validate_enrichment_df
+from schemas import build_run_metadata, normalize_claims
 
 
 def run_enrichment_pipeline(
@@ -12,6 +14,10 @@ def run_enrichment_pipeline(
     phenotype: str,
     context: dict,
 ):
+    validation = validate_enrichment_df(df)
+    if not validation.get("ok"):
+        raise ValueError(validation.get("error") or "Input validation failed.")
+
     # 1) stats + biofit + gene overlap clustering
     tri = triage_enrichment_table(
         df,
@@ -33,7 +39,7 @@ def run_enrichment_pipeline(
         programs=programs,
     )
 
-    # 4) GPT-5 + playbook + optional RAG + PubMed evidence
+    # 4) GPT-5 + playbook + optional RAG + PubMed evidence, now structured around InterpretationClaim
     gpt = gpt5_reason_simple(
         phenotype=phenotype,
         context=context,
@@ -42,9 +48,22 @@ def run_enrichment_pipeline(
         pubmed_context=pubmed_context,
     )
 
+    claims = normalize_claims(gpt.get("parsed", {}) or {})
+
+    metadata = build_run_metadata(
+        df_columns=list(df.columns),
+        n_rows=len(df),
+        phenotype=phenotype,
+        context=context,
+        model_name=gpt.get("model", "gpt-5"),
+    )
+
     return {
+        "metadata": metadata,
+        "input_validation": validation,
         "triage": tri,
         "programs": programs,
         "pubmed": pubmed_context,
         "gpt": gpt,
+        "claims": claims,
     }
