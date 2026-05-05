@@ -10,8 +10,9 @@ from datetime import datetime
 
 from summarizer import build_triage_pdf
 from pipeline import run_enrichment_pipeline
+from input_validation import validate_enrichment_df
 
-app = Flask(__name__)  # expects templates/index.html by default
+app = Flask(__name__)
 
 # ---- Upload limits ----
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25MB
@@ -31,54 +32,33 @@ def _safe_get(d: dict, *path, default=None):
 def _build_ui_fields(result: dict, phenotype: str, context: dict) -> dict:
     gpt = result.get("gpt", {}) or {}
     display = gpt.get("display", {}) or {}
-
     programs = result.get("programs", {}) or {}
     program_list = programs.get("programs", []) or []
+    claims = result.get("claims", []) or []
 
     top_program = ""
     if program_list and isinstance(program_list[0], dict):
-        top_program = (
-            program_list[0].get("label")
-            or program_list[0].get("program")
-            or program_list[0].get("name")
-            or ""
-        )
+        top_program = program_list[0].get("label") or program_list[0].get("program") or program_list[0].get("name") or ""
 
-    gpt_summary = "\n\n".join(
-        x for x in [
-            display.get("headline", ""),
-            display.get("experimental_context", ""),
-            display.get("most_plausible_biology", ""),
-        ] if x
-    ).strip()
-
-    ranked_programs = "\n\n".join(
-        x for x in [
-            display.get("most_plausible_biology", ""),
-            display.get("likely_reactive_programs", ""),
-            display.get("evidence_strength_rationale", ""),
-        ] if x
-    ).strip()
-
-    confounders = "\n\n".join(
-        x for x in [
-            display.get("likely_artifacts_confounders", ""),
-            display.get("main_uncertainties", ""),
-        ] if x
-    ).strip()
-
-    follow_ups = display.get("follow_up_experiments", "")
+    top_driver = ""
+    for c in claims:
+        if (c.get("role") or "").lower().startswith("likely driver"):
+            top_driver = c.get("program") or c.get("claim") or ""
+            break
 
     return {
         "phenotype": phenotype,
         "context": context,
         "programs_returned": len(program_list),
+        "claims_returned": len(claims),
         "top_program": top_program,
-        "gpt_summary": gpt_summary,
-        "ranked_programs": ranked_programs,
-        "confounders_to_watch": confounders,
-        "follow_up_experiments": follow_ups,
+        "top_driver": top_driver,
         "headline": display.get("headline", ""),
+        "executive_summary": display.get("executive_summary", ""),
+        "gpt_summary": "\n\n".join(x for x in [display.get("headline", ""), display.get("executive_summary", ""), display.get("most_plausible_biology", "")] if x).strip(),
+        "ranked_programs": display.get("most_plausible_biology", ""),
+        "confounders_to_watch": display.get("likely_artifacts_confounders", ""),
+        "follow_up_experiments": display.get("follow_up_experiments", ""),
         "experimental_context": display.get("experimental_context", ""),
         "raw_gpt_text": gpt.get("raw_text", ""),
     }
@@ -91,14 +71,29 @@ def get_report(filename):
 
 @app.errorhandler(RequestEntityTooLarge)
 def handle_file_too_large(e):
-    return jsonify({
-        "error": "Uploaded file is too large. Max allowed is 25MB."
-    }), 413
+    return jsonify({"error": "Uploaded file is too large. Max allowed is 25MB."}), 413
 
 
 @app.get("/")
 def home():
     return render_template("index.html")
+
+
+@app.post("/validate")
+def validate_upload():
+    """Validate a CSV before running PubMed/GPT. This is the new product-facing input contract route."""
+    try:
+        if "file" not in request.files:
+            return jsonify({"ok": False, "error": "Missing file upload field 'file'."}), 400
+        file = request.files["file"]
+        if not file or file.filename == "":
+            return jsonify({"ok": False, "error": "No file selected."}), 400
+        df = pd.read_csv(file)
+        validation = validate_enrichment_df(df)
+        return jsonify(validation), (200 if validation.get("ok") else 400)
+    except Exception as e:
+        app.logger.exception("Validate failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.post("/analyze")
@@ -125,37 +120,29 @@ def analyze():
         }
 
         df = pd.read_csv(file)
+        validation = validate_enrichment_df(df)
+        if not validation.get("ok"):
+            return jsonify({"error": validation.get("error"), "input_validation": validation}), 400
 
-        result = run_enrichment_pipeline(
-            df,
-            phenotype=phenotype,
-            context=context,
-        )
+        result = run_enrichment_pipeline(df, phenotype=phenotype, context=context)
 
-        # Make phenotype/context available at top level for downstream consumers
         result["phenotype"] = phenotype
         result["context"] = context
-
-        # Add UI-friendly fields so frontend cards do not need to scrape raw markdown
         result["gpt_display"] = _build_ui_fields(result, phenotype, context)
 
         return jsonify(result)
 
     except Exception as e:
-        import traceback
+        # Product-facing error: no raw traceback in response. Traceback still goes to logs.
         app.logger.exception("Analyze failed")
         return jsonify({
             "error": str(e),
-            "traceback": traceback.format_exc(),
+            "support_hint": "Check that the CSV has a term/pathway column, genes column, and adjusted p-value/FDR column.",
         }), 500
 
 
 @app.post("/summarize")
 def summarize():
-    """
-    Accepts triage JSON (from /analyze) and writes a PDF report into a writable reports dir.
-    Returns a URL to open/embed in the UI.
-    """
     try:
         triage_json = request.get_json(silent=True)
         if not isinstance(triage_json, dict):
@@ -184,7 +171,6 @@ def summarize():
             context = {}
 
         triage_json.setdefault("gpt", {})
-
         if phenotype and not triage_json["gpt"].get("phenotype"):
             triage_json["gpt"]["phenotype"] = phenotype
 
@@ -198,27 +184,27 @@ def summarize():
         }
 
         assay = context.get("assay", "").strip()
-
-        title = f"{assay} Enrichment Triage Report" if assay else "Enrichment Triage Report"
+        title = f"{assay} Evidence-Aware Enrichment Interpretation" if assay else "Evidence-Aware Enrichment Interpretation"
 
         build_triage_pdf(
-         triage_json=triage_json,
-         out_pdf_path=pdf_path,
-         title=title,
-         subtitle=f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            triage_json=triage_json,
+            out_pdf_path=pdf_path,
+            title=title,
+            subtitle=f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         )
 
         pdf_url = f"/reports/{pdf_filename}"
         return jsonify({"pdf_url": pdf_url})
 
     except Exception as e:
-        import traceback
         app.logger.exception("Summarize failed")
-        return jsonify({
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-        }), 500
+        return jsonify({"error": str(e)}), 500
+
+
+@app.get("/health")
+def health():
+    return jsonify({"ok": True, "service": "enrichment-triage", "version": os.environ.get("APP_VERSION", "0.2.0-productization")})
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=True)
