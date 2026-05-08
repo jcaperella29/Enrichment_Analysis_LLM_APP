@@ -1,4 +1,4 @@
-!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -253,7 +253,7 @@
 <header>
   <div class="wrap">
     <h1>Enrichment Triage</h1>
-    <div class="sub">Upload Enrichr-like enrichment results → program summary → GPT-5 + RAG prioritization & follow-ups.</div>
+    <div class="sub">Upload an enrichment CSV or Network Studio bundle → program summary → GPT-5 + RAG prioritization & follow-ups.</div>
   </div>
 </header>
 
@@ -268,8 +268,8 @@
       </div>
       <div class="bd">
         <form id="analyzeForm" method="post" action="/analyze" enctype="multipart/form-data">
-          <label>Enrichment CSV</label>
-          <input id="file" type="file" name="file" accept=".csv,text/csv" required />
+          <label>Enrichment CSV or Network Studio bundle (.zip)</label>
+          <input id="file" type="file" name="file" accept=".csv,.zip,text/csv,application/zip" required />
 
           <label>Phenotype (what you care about)</label>
           <textarea id="phenotype" name="phenotype" placeholder="e.g., increased muscle hypertrophy; fibrosis; antiviral response; tumor growth..." required></textarea>
@@ -341,7 +341,7 @@
       <div class="tabs">
         <div class="tab active" data-tab="programs">Programs</div>
         <div class="tab" data-tab="terms">Top Terms</div>
-        <div class="tab" data-tab="pdf">PDF Report</div>
+        <div class="tab" data-tab="pdf">Reports</div>
         <div class="tab" data-tab="raw">Raw JSON</div>
       </div>
 
@@ -410,11 +410,11 @@
         </div>
       </div>
 
-      <!-- PDF panel (WAS MISSING) -->
+      <!-- Reports panel: PDF + Markdown -->
       <div class="panel" id="panel-pdf">
         <div class="item">
           <div class="top">
-            <div class="name">PDF report</div>
+            <div class="name">Reports</div>
             <div class="score" id="pdfStatus">Not generated</div>
           </div>
 
@@ -430,10 +430,16 @@
                      background: linear-gradient(180deg, rgba(84,209,139,.55), rgba(84,209,139,.25));">
               Download PDF
             </button>
+
+            <button id="downloadMarkdownBtn" type="button" disabled
+              style="border:1px solid rgba(255,255,255,.14);
+                     background: linear-gradient(180deg, rgba(247,201,72,.55), rgba(247,201,72,.25));">
+              Download Markdown
+            </button>
           </div>
 
           <div class="meta" style="margin-top:10px;">
-            Preview:
+            PDF preview:
           </div>
           <iframe id="pdfFrame"
                   title="PDF preview"
@@ -472,10 +478,12 @@
 
   const makePdfBtn = document.getElementById("makePdfBtn");
   const downloadPdfBtn = document.getElementById("downloadPdfBtn");
+  const downloadMarkdownBtn = document.getElementById("downloadMarkdownBtn");
   const pdfFrame = document.getElementById("pdfFrame");
   const pdfStatus = document.getElementById("pdfStatus");
 
   let lastPdfUrl = null;
+  let lastMarkdownUrl = null;
   let lastResult = null;
 
   function setStatus(msg, kind="") {
@@ -524,18 +532,23 @@
 
       const data = JSON.parse(text);
       const url = data?.pdf_url;
+      const mdUrl = data?.markdown_url;
+
       if (!url) {
         pdfStatus.textContent = "Failed";
-        setStatus("PDF route returned no pdf_url.", "bad");
+        setStatus("Report route returned no pdf_url.", "bad");
         return;
       }
 
       lastPdfUrl = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
-      pdfFrame.src = lastPdfUrl;
-      pdfStatus.textContent = "Ready ✅";
-      downloadPdfBtn.disabled = false;
+      lastMarkdownUrl = mdUrl ? mdUrl + (mdUrl.includes("?") ? "&" : "?") + "t=" + Date.now() : null;
 
-      setStatus("PDF generated ✅", "ok");
+      pdfFrame.src = lastPdfUrl;
+      pdfStatus.textContent = mdUrl ? "PDF + Markdown ready ✅" : "PDF ready ✅";
+      downloadPdfBtn.disabled = false;
+      downloadMarkdownBtn.disabled = !lastMarkdownUrl;
+
+      setStatus(mdUrl ? "PDF + Markdown generated ✅" : "PDF generated ✅", "ok");
     } catch (err) {
       pdfStatus.textContent = "Failed";
       setStatus("Client error generating PDF:\n" + (err?.message || String(err)), "bad");
@@ -551,6 +564,18 @@
     const a = document.createElement("a");
     a.href = cleanUrl;
     a.download = cleanUrl.split("/").pop() || "triage_report.pdf";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+
+  downloadMarkdownBtn.addEventListener("click", () => {
+    if (!lastMarkdownUrl) return;
+
+    const cleanUrl = lastMarkdownUrl.split("?")[0];
+    const a = document.createElement("a");
+    a.href = cleanUrl;
+    a.download = cleanUrl.split("/").pop() || "triage_report.md";
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -755,6 +780,7 @@
     downloadBtn.disabled = true;
     makePdfBtn.disabled = true;
     downloadPdfBtn.disabled = true;
+    downloadMarkdownBtn.disabled = true;
 
     setStatus("Running analysis…", "");
 
@@ -787,9 +813,11 @@
 
       // Reset any previous PDF
       lastPdfUrl = null;
+      lastMarkdownUrl = null;
       pdfFrame.src = "";
       pdfStatus.textContent = "Not generated";
       downloadPdfBtn.disabled = true;
+      downloadMarkdownBtn.disabled = true;
 
       setStatus("Done ✅", "ok");
 
