@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List
 
 from openai import OpenAI
 from schemas import claim_schema_for_prompt
+from playbook_retriever import retrieve_playbook_context
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
@@ -23,6 +24,7 @@ When external literature evidence is provided, use it carefully:
 - note when literature and the current data do not align
 - do not overclaim causality from literature alone
 - when you refer to a retrieved paper, cite it inline as (PMID: XXXXXXXX)
+- respect literature relevance labels: weak_background papers are background only, general_support papers are context, and direct_support_candidate papers are still not causal proof
 """
 
 # Works when reasoner.py lives at project root; also tolerates older nested layout.
@@ -127,7 +129,14 @@ def build_gpt_display_fields(gpt: Dict[str, Any]) -> Dict[str, str]:
     ranked = []
     confs = []
     validations = []
+    top_primary_driver = ""
+    top_downstream_mechanism = ""
     for c in claims:
+        role_l = (c.get('role') or '').lower()
+        if not top_primary_driver and role_l.startswith('likely primary driver'):
+            top_primary_driver = c.get('program') or c.get('claim') or ''
+        if not top_downstream_mechanism and role_l.startswith('likely downstream'):
+            top_downstream_mechanism = c.get('program') or c.get('claim') or ''
         ranked.append(f"{c.get('program', '')}: {c.get('role', 'Uncertain')} / {c.get('evidence_strength', 'Weak')} — {c.get('claim', '')}")
         for x in c.get("confounders", []) or []:
             if x not in confs:
@@ -149,6 +158,8 @@ def build_gpt_display_fields(gpt: Dict[str, Any]) -> Dict[str, str]:
         "evidence_strength_rationale": sections.get("evidence_strength_rationale", ""),
         "follow_up_experiments": "\n".join(validations) or sections.get("follow_up_experiments", ""),
         "main_uncertainties": "\n".join(parsed.get("assay_limitations", []) or []) or sections.get("main_uncertainties", ""),
+        "top_primary_driver": top_primary_driver,
+        "top_downstream_mechanism": top_downstream_mechanism,
         "raw_text": gpt.get("raw_text", ""),
     }
 
@@ -169,11 +180,21 @@ def _compact_pubmed_context(pubmed_context: Optional[Dict[str, Any]], max_papers
             "authors": (p.get("authors", []) or [])[:5],
             "abstract": (p.get("abstract", "") or "")[:2500],
             "url": p.get("url", ""),
+            "relevance_label": p.get("relevance_label", "not_assessed"),
+            "relevance_score": p.get("relevance_score", 0),
+            "relevance_reason": p.get("relevance_reason", ""),
+            "literature_use": p.get("literature_use", ""),
         })
     return {
         "status": pubmed_context.get("status", ""),
         "source": pubmed_context.get("source", "PubMed via NCBI E-utilities"),
         "query": pubmed_context.get("query", ""),
+        "query_used": pubmed_context.get("query_used", ""),
+        "query_strategy": pubmed_context.get("query_strategy", ""),
+        "retrieval_quality": pubmed_context.get("retrieval_quality", "not_assessed"),
+        "retrieval_quality_reason": pubmed_context.get("retrieval_quality_reason", ""),
+        "relevance_counts": pubmed_context.get("relevance_counts", {}),
+        "literature_use_guidance": pubmed_context.get("literature_use_guidance", ""),
         "top_terms_used": pubmed_context.get("top_terms_used", []),
         "top_genes_used": pubmed_context.get("top_genes_used", []),
         "papers": compact_papers,
@@ -207,6 +228,146 @@ def _markdown_from_parsed(parsed: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+ROLE_VOCABULARY = [
+    "Likely primary driver",
+    "Likely downstream mechanism",
+    "Likely downstream response",
+    "Likely reactive",
+    "Likely artifact / confounded",
+    "Uncertain",
+]
+
+
+def _text_has_any(text: str, terms: List[str]) -> bool:
+    text = (text or "").lower()
+    return any(t.lower() in text for t in terms)
+
+
+def normalize_program_label(program: str, phenotype: str, context: Dict[str, Any]) -> str:
+    """
+    Make program labels clearer for reporting without changing the underlying biology.
+    This mainly prevents generic labels like INFLAMMATION_NFKB from reading as
+    "inflammation is the primary driver" in glucocorticoid/dexamethasone runs.
+    """
+    p = (program or "").strip()
+    p_l = p.lower().replace("-", "_")
+    perturbation_l = str((context or {}).get("perturbation", "")).lower()
+    phenotype_l = (phenotype or "").lower()
+    combined = " ".join([p_l, perturbation_l, phenotype_l])
+
+    is_glucocorticoid_context = _text_has_any(
+        combined,
+        ["dexamethasone", "glucocorticoid", "corticosteroid", "steroid"],
+    )
+
+    if is_glucocorticoid_context:
+        if _text_has_any(p_l, ["inflammation", "nfkb", "nf_kappa", "nfκb", "cytokine", "chemokine"]):
+            return "ANTI_INFLAMMATORY_NFKB_ATTENUATION"
+        if _text_has_any(p_l, ["mapk", "stress_kinase", "stress kinase"]):
+            return "MAPK_STRESS_KINASE_ATTENUATION"
+
+    return p
+
+
+def normalize_interpretation_role(
+    role: str,
+    program: str,
+    claim: str,
+    phenotype: str,
+    context: Dict[str, Any],
+) -> str:
+    """
+    Normalize model-produced role labels so downstream effects are not overcalled
+    as primary drivers. This is intentionally conservative and mostly affects
+    display/reporting. It is safe even if the JSON schema still uses the older
+    role labels, because it runs after the model response is parsed.
+    """
+    role = (role or "").strip()
+    role_l = role.lower()
+    program_l = (program or "").lower().replace("-", "_")
+    claim_l = (claim or "").lower()
+    phenotype_l = (phenotype or "").lower()
+    perturbation_l = str((context or {}).get("perturbation", "")).lower()
+    text = " ".join([program_l, claim_l, phenotype_l, perturbation_l])
+
+    # Preserve explicit negative/uncertain calls.
+    if "artifact" in role_l or "confounded" in role_l:
+        return "Likely artifact / confounded"
+    if "uncertain" in role_l:
+        return "Uncertain"
+
+    # Already-normalized labels pass through.
+    if role in ROLE_VOCABULARY:
+        return role
+
+    has_glucocorticoid_perturbation = _text_has_any(
+        perturbation_l,
+        ["dexamethasone", "glucocorticoid", "corticosteroid", "steroid"],
+    )
+    is_gr_program = _text_has_any(
+        text,
+        ["glucocorticoid", "nr3c1", "gr_response", "gr response", "steroid hormone", "fkbp5", "tsc22d3"],
+    )
+    is_nfkb_or_inflammation = _text_has_any(
+        text,
+        ["nfkb", "nf-kappa", "nf_kappa", "nfκb", "inflammation", "cytokine", "chemokine", "tnf", "il6", "cxcl8", "ccl2"],
+    )
+    is_mapk_stress = _text_has_any(
+        text,
+        ["mapk", "stress kinase", "dusp1", "dusp5", "dusp10", "p38", "jnk", "erk"],
+    )
+
+    # Dexamethasone/glucocorticoid runs: GR is upstream; NF-kB/MAPK/cytokine
+    # outputs are generally downstream unless independent evidence says otherwise.
+    if has_glucocorticoid_perturbation:
+        if is_gr_program:
+            return "Likely primary driver"
+        if is_nfkb_or_inflammation or is_mapk_stress:
+            if "reactive" in role_l or _text_has_any(claim_l, ["late", "reactive", "cytokine output", "chemokine output"]):
+                return "Likely downstream response"
+            return "Likely downstream mechanism"
+
+    # General language-based correction.
+    if _text_has_any(claim_l, ["downstream of", "secondary to", "consequence of", "attenuation downstream"]):
+        return "Likely downstream mechanism"
+    if _text_has_any(claim_l, ["late timepoint", "reactive consequence", "secondary response", "endpoint"]):
+        return "Likely downstream response"
+
+    # Backward compatibility with older prompt/schema labels.
+    if role_l in {"likely driver", "driver"}:
+        return "Likely primary driver"
+    if "reactive" in role_l:
+        return "Likely reactive"
+
+    return role or "Uncertain"
+
+
+def normalize_claim_roles_and_labels(parsed: Dict[str, Any], phenotype: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply role and label normalization in-place and return parsed."""
+    if not isinstance(parsed, dict):
+        return parsed
+
+    for c in parsed.get("claims", []) or []:
+        if not isinstance(c, dict):
+            continue
+        old_program = c.get("program", "")
+        new_program = normalize_program_label(old_program, phenotype, context)
+        c["program"] = new_program
+        c["role"] = normalize_interpretation_role(
+            role=c.get("role", ""),
+            program=new_program or old_program,
+            claim=c.get("claim", ""),
+            phenotype=phenotype,
+            context=context,
+        )
+
+    # Keep top-level summaries aligned if they exist.
+    if parsed.get("top_driver"):
+        parsed["top_driver"] = normalize_program_label(str(parsed.get("top_driver", "")), phenotype, context)
+
+    return parsed
+
+
 def gpt5_reason_simple(
     *,
     phenotype: str,
@@ -214,6 +375,7 @@ def gpt5_reason_simple(
     triage: Dict[str, Any],
     programs: Dict[str, Any],
     pubmed_context: Optional[Dict[str, Any]] = None,
+    playbook_context: Optional[Dict[str, Any]] = None,
     vector_store_id: Optional[str] = None,
     model: str = "gpt-5",
 ) -> Dict[str, Any]:
@@ -226,8 +388,19 @@ def gpt5_reason_simple(
         "top_terms": (triage.get("rows") or [])[:50],
     }
 
-    assay = (context or {}).get("assay", "")
-    playbook_md = _load_playbook_md(assay)
+    # Retrieval-first playbook grounding.
+    # This replaces the earlier direct injection of full selected markdown playbooks.
+    # If no vector store is configured, retrieve_playbook_context uses a compact local fallback.
+    if playbook_context is None:
+        playbook_context = retrieve_playbook_context(
+            phenotype=phenotype,
+            context=context,
+            triage=triage,
+            programs=programs,
+            vector_store_id=vs_id,
+        )
+
+    playbook_guidance = (playbook_context or {}).get("context_text", "").strip()
     pubmed_payload = _compact_pubmed_context(pubmed_context)
     schema = claim_schema_for_prompt()
 
@@ -243,8 +416,8 @@ Experiment context:
 Phenotype:
 {phenotype}
 
-PLAYBOOK RULES (authoritative; follow these):
-{playbook_md if playbook_md else "(none found)"}
+RETRIEVED PLAYBOOK GUIDANCE (authoritative; follow these when relevant):
+{playbook_guidance if playbook_guidance else "(none retrieved; rely on required interpretation behavior)"}
 
 External biomedical literature context (PubMed / NCBI):
 {json.dumps(pubmed_payload, indent=2)}
@@ -255,8 +428,13 @@ Enrichment summary:
 Required interpretation behavior:
 - Create 3 to 8 InterpretationClaim-style claims.
 - Tie every claim to supporting terms, row IDs, genes, and PMIDs when available.
-- If PMIDs are only background, set literature_status to background or general_support, not direct_support.
-- Separate likely drivers, likely reactive programs, likely artifact/confounded programs, and uncertain programs.
+- Use paper-level relevance_label values: weak_background papers must not be used as direct support; general_support papers can support context; direct_support_candidate papers can be cited as direct literature support but still do not prove causality.
+- If retrieval_quality is low or low_to_moderate, say the PubMed section is background retrieval and keep literature_status as background/general_support unless a specific paper clearly overlaps the claim.
+- Classify each program using one of: Likely primary driver, Likely downstream mechanism, Likely downstream response, Likely reactive, Likely artifact / confounded, or Uncertain.
+- Use Likely primary driver only for the most upstream perturbation-linked or phenotype-linked program.
+- Use Likely downstream mechanism for pathways mechanistically downstream of the primary driver but still biologically important.
+- Use Likely downstream response for late transcriptional outputs, cytokine/chemokine changes, compensation, or endpoint biology.
+- Do not label both an upstream regulator and its downstream consequence as primary drivers unless independent evidence supports both.
 - Assign evidence_strength as Stronger, Moderate, or Weak.
 - Every claim needs at least one validation experiment with a readout and control.
 - Include assay limitations and top confounders.
@@ -294,6 +472,7 @@ Required interpretation behavior:
 
     try:
         parsed = _extract_json_object(out)
+        parsed = normalize_claim_roles_and_labels(parsed, phenotype=phenotype, context=context)
         raw_text = _markdown_from_parsed(parsed)
         sections = parse_gpt_markdown_sections(raw_text)
         gpt_result = {
@@ -305,7 +484,8 @@ Required interpretation behavior:
             "phenotype": phenotype,
             "experiment_context": context,
             "pubmed_context": pubmed_payload,
-            "playbook_files_loaded_from": str(PLAYBOOK_DIR),
+            "playbook_context": playbook_context or {},
+            "playbook_retrieval_mode": (playbook_context or {}).get("mode", "none"),
         }
     except Exception:
         sections = parse_gpt_markdown_sections(out)
@@ -317,8 +497,10 @@ Required interpretation behavior:
             "phenotype": phenotype,
             "experiment_context": context,
             "pubmed_context": pubmed_payload,
-            "playbook_files_loaded_from": str(PLAYBOOK_DIR),
+            "playbook_context": playbook_context or {},
+            "playbook_retrieval_mode": (playbook_context or {}).get("mode", "none"),
         }
 
     gpt_result["display"] = build_gpt_display_fields(gpt_result)
     return gpt_result
+
