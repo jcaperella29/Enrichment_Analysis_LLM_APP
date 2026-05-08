@@ -8,7 +8,8 @@ from werkzeug.exceptions import RequestEntityTooLarge
 import pandas as pd
 from datetime import datetime
 
-from summarizer import build_triage_pdf
+from input_loader import load_analysis_input
+from summarizer import build_triage_pdf, write_triage_markdown
 from pipeline import run_enrichment_pipeline
 from input_validation import validate_enrichment_df
 
@@ -81,15 +82,17 @@ def home():
 
 @app.post("/validate")
 def validate_upload():
-    """Validate a CSV before running PubMed/GPT. This is the new product-facing input contract route."""
+    """Validate a CSV or Network Studio bundle before running PubMed/GPT."""
     try:
         if "file" not in request.files:
             return jsonify({"ok": False, "error": "Missing file upload field 'file'."}), 400
         file = request.files["file"]
         if not file or file.filename == "":
             return jsonify({"ok": False, "error": "No file selected."}), 400
-        df = pd.read_csv(file)
+
+        df, input_info = load_analysis_input(file)
         validation = validate_enrichment_df(df)
+        validation["input_info"] = input_info
         return jsonify(validation), (200 if validation.get("ok") else 400)
     except Exception as e:
         app.logger.exception("Validate failed")
@@ -119,13 +122,15 @@ def analyze():
             "organism": request.form.get("organism", "").strip(),
         }
 
-        df = pd.read_csv(file)
+        df, input_info = load_analysis_input(file)
         validation = validate_enrichment_df(df)
+        validation["input_info"] = input_info
         if not validation.get("ok"):
             return jsonify({"error": validation.get("error"), "input_validation": validation}), 400
 
         result = run_enrichment_pipeline(df, phenotype=phenotype, context=context)
 
+        result["input_info"] = input_info
         result["phenotype"] = phenotype
         result["context"] = context
         result["gpt_display"] = _build_ui_fields(result, phenotype, context)
@@ -152,7 +157,9 @@ def summarize():
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         pdf_filename = f"triage_report_{ts}.pdf"
+        md_filename = f"triage_report_{ts}.md"
         pdf_path = os.path.join(REPORTS_DIR, pdf_filename)
+        md_path = os.path.join(REPORTS_DIR, md_filename)
 
         phenotype = (
             _safe_get(triage_json, "programs", "meta", "phenotype")
@@ -186,15 +193,24 @@ def summarize():
         assay = context.get("assay", "").strip()
         title = f"{assay} Evidence-Aware Enrichment Interpretation" if assay else "Evidence-Aware Enrichment Interpretation"
 
+        generated_subtitle = f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
         build_triage_pdf(
             triage_json=triage_json,
             out_pdf_path=pdf_path,
             title=title,
-            subtitle=f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            subtitle=generated_subtitle,
+        )
+        write_triage_markdown(
+            triage_json=triage_json,
+            out_md_path=md_path,
+            title=title,
+            subtitle=generated_subtitle,
         )
 
         pdf_url = f"/reports/{pdf_filename}"
-        return jsonify({"pdf_url": pdf_url})
+        markdown_url = f"/reports/{md_filename}"
+        return jsonify({"pdf_url": pdf_url, "markdown_url": markdown_url})
 
     except Exception as e:
         app.logger.exception("Summarize failed")
